@@ -1,60 +1,60 @@
 # mixed-cognition-sim
 
-Multi-LLM agent simulation for studying emergent behavior in mixed-cognition populations.
+異なるLLMモデルを混在させたマルチエージェントシミュレーション。混合認知集団における創発的行動を研究するためのエンジン。
 
-## Credit
+## クレジット
 
-This project builds on the paradigm introduced by [ryukih/llm-agents-simulation](https://github.com/ryukih/llm-agents-simulation), which established a fire-evacuation observation task for LLM agents. The present implementation is written from scratch based on an independent design specification, with no code reuse from the original repository.
+本プロジェクトは [ryukih/llm-agents-simulation](https://github.com/ryukih/llm-agents-simulation) が確立した火災避難観察課題のパラダイムに基づいています。実装は独立した設計仕様書からスクラッチで行っており、元リポジトリからのコード流用はありません。
 
-## Overview
+## 概要
 
-Agents inhabit a 2D grid world with named locations. Each agent is backed by a different LLM model (routed via Ollama), grouped into "blocs." Agents are unaware of their own model or bloc assignment. The simulation runs a synchronous 4-phase loop per step:
+エージェントは名前付きの場所を持つ2D格子世界に存在します。各エージェントには異なるLLMモデル（Ollama経由でルーティング）が割り当てられ、「ブロック」にグループ化されます。エージェント自身は自分のモデルやブロックの所属を知りません。シミュレーションは1ステップあたり同期的な4フェーズループで実行されます:
 
-1. **Phase 1**: Each agent decides what message to send
-2. **Phase 2**: Messages are delivered to nearby agents (Euclidean distance + same-region constraint)
-3. **Phase 3**: Each agent decides an action (move/stay) and writes a memory note
-4. **Phase 4**: Movement is executed (1 cell, clamped to grid bounds)
+1. **Phase 1**: 各エージェントが送信メッセージを決定
+2. **Phase 2**: 近傍エージェントへメッセージを配送（ユークリッド距離＋同一領域制約）
+3. **Phase 3**: 各エージェントが行動（移動/停止）を決定し、メモリノートを記録
+4. **Phase 4**: 移動を実行（1セル、盤外はクランプ）
 
-## Requirements
+## 必要環境
 
 - Python 3.10+
-- Ollama running locally (or at a configured endpoint)
-- Dependencies: `requests`, `pyyaml`
+- Ollama がローカル（または設定したエンドポイント）で稼働していること
+- 依存パッケージ: `requests`, `pyyaml`
 
 ```bash
 pip install -r requirements.txt
 ```
 
-## Usage
+## 使い方
 
 ```bash
 python main.py --config configs/smoke_local.yaml
 ```
 
-Output is written to `output_<run_name>/`.
+出力は `output_<run_name>/` に書き出されます。
 
-## Config Schema
+## Config スキーマ
 
 ```yaml
 simulation:
-  duration: 15          # number of steps
-  half_space_size: 25   # grid ranges [-S, +S]
-  seed: 42              # RNG seed
-  run_name: smoke_local # output directory suffix
+  duration: 15          # ステップ数
+  half_space_size: 25   # 格子範囲 [-S, +S]
+  seed: 42              # 乱数シード
+  run_name: smoke_local # 出力ディレクトリの接尾辞
 
 blocs:
   - name: alpha
     model: "qwen2.5:3b"
     base_url: "http://localhost:11434"
     num_agents: 2
-    # llm_overrides: {}  # optional per-bloc LLM parameter overrides
+    # llm_overrides: {}  # ブロック別LLMパラメータ上書き（任意）
 
 agents:
-  communication_radius: 8       # Euclidean distance for message delivery
-  memory_limit: 20              # max stored memories
-  memory_size: 5                # memories shown in prompt
-  message_history_limit: 10     # max stored received messages
-  message_context_size: 3       # messages shown in prompt
+  communication_radius: 8       # メッセージ配送のユークリッド距離
+  memory_limit: 20              # 保持するメモリの上限
+  memory_size: 5                # プロンプトに含めるメモリ数
+  message_history_limit: 10     # 保持する受信メッセージの上限
+  message_context_size: 3       # プロンプトに含めるメッセージ数
 
 places:
   - name: left_bar
@@ -69,20 +69,20 @@ llm_defaults:
   timeout_s: 120
 ```
 
-## Log Schema
+## ログスキーマ
 
-All logs are in `output_<run_name>/`:
+全ログは `output_<run_name>/` 内に出力されます:
 
-- **messages.jsonl**: `{step, sender_id, sender_bloc, sender_model, receiver_ids, message, reasoning}` -- delivered messages only
-- **phase1_raw.jsonl**: `{step, agent_id, bloc, model, parsed, raw_output}` -- all Phase 1 outputs for diagnostics
+- **messages.jsonl**: `{step, sender_id, sender_bloc, sender_model, receiver_ids, message, reasoning}` — 配送が成立したメッセージのみ
+- **phase1_raw.jsonl**: `{step, agent_id, bloc, model, parsed, raw_output}` — Phase 1 の全出力（診断用）
 - **memory_reasoning.jsonl**: `{step, agent_id, bloc, model, position, action, direction, memory, reasoning}`
-- **run_meta.json**: config snapshot, seed, timestamps, parse error rate
-- **parse_errors.jsonl**: `{step, agent_id, phase, raw_output}` -- failed JSON parses
+- **run_meta.json**: config全文スナップショット、シード、開始/終了時刻、パース失敗率
+- **parse_errors.jsonl**: `{step, agent_id, phase, raw_output}` — JSONパース失敗時の生出力
 
-## Vocabulary Metrics
+## 語彙伝播メトリクス
 
 ```bash
 python tools/vocab_metrics.py output_smoke_local
 ```
 
-Produces `vocab_report.md` (per-bloc distinctive words + crossover events) and `vocab_events.csv`.
+`vocab_report.md`（ブロック別固有語彙表＋越境イベント時系列）と `vocab_events.csv` を生成します。
