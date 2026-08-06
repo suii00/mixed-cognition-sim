@@ -2,9 +2,22 @@
 
 異なるLLMモデルを混在させたマルチエージェントシミュレーション。混合認知集団における創発的行動を研究するためのエンジン。
 
-## クレジット
+## クレジットと系譜
 
-本プロジェクトは [ryukih/llm-agents-simulation](https://github.com/ryukih/llm-agents-simulation) が確立した火災避難観察課題のパラダイムに基づいています。実装は独立した設計仕様書からスクラッチで行っており、元リポジトリからのコード流用はありません。
+数値情報のみを与え定性評価を排除する観察パラダイムは、AUTOMATA ハッカソン
+Vol.1 課題 [ryukih/llm-agents-simulation](https://github.com/ryukih/llm-agents-simulation)
+（GPL-3.0）に由来し、Vol.2 では公式デモ
+[ryukih/SD-Hackathon-2026DEMO](https://github.com/ryukih/SD-Hackathon-2026DEMO)
+（Apache-2.0, © 2026 Dr. Ryuki HYODO / SpaceData Inc.）として提供されている。
+
+本リポジトリは設計仕様書からのスクラッチ実装であり、上記からのコード流用は
+ない。4フェーズ実行順序・通信制約・jsonl フィールド名は、Vol.1 で筆者が構築した
+[観察ツールとハルシネーション分類](https://github.com/suii00/2d-multi-places-simulation-on-fire-public)
+を適用可能にするため、意図的に互換を保っている。
+
+本プロジェクトの独自点: エージェントをブロック単位で異なる LLM に割り当て、
+ブロック／モデル情報をエージェント自身には一切開示しない。ブロック間の差は
+モデル重みのみに由来する。
 
 ## 概要
 
