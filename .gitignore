@@ -1,4 +1,6 @@
 __pycache__/
 *.pyc
 output_*/
+!output_mvp_demo/*.jsonl
+!output_mvp_demo/run_meta.json
 renamed_run_dir/
