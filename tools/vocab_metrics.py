@@ -190,6 +190,92 @@ def compute_crossover_events(
     return events
 
 
+def load_bloc_model_map(run_dir: str) -> Dict[str, str]:
+    meta_path = os.path.join(run_dir, "run_meta.json")
+    if not os.path.exists(meta_path):
+        return {}
+    with open(meta_path, "r", encoding="utf-8") as f:
+        meta = json.load(f)
+    mapping = {}
+    for bloc in meta.get("config", {}).get("blocs", []):
+        mapping[bloc["name"]] = bloc["model"]
+    return mapping
+
+
+def render_chart(
+    output_dir: str,
+    distinctive: Dict[str, List[Tuple[str, float]]],
+    events: List[Dict],
+    bloc_model_map: Dict[str, str],
+    max_step: int,
+) -> None:
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    all_blocs = sorted(distinctive.keys())
+    colors = {}
+    palette = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
+               "#8c564b", "#e377c2", "#7f7f7f"]
+    for i, bloc in enumerate(all_blocs):
+        colors[bloc] = palette[i % len(palette)]
+
+    all_words = []
+    word_source = {}
+    for bloc in all_blocs:
+        for word, _ in distinctive[bloc]:
+            if word not in word_source:
+                all_words.append(word)
+                word_source[word] = bloc
+
+    fig, ax = plt.subplots(figsize=(12, max(4, len(all_words) * 0.3)))
+
+    word_to_y = {w: i for i, w in enumerate(reversed(all_words))}
+
+    for event in events:
+        word = event["word"]
+        if word not in word_to_y:
+            continue
+        y = word_to_y[word]
+        target_bloc = event["target_bloc"]
+        ax.scatter(
+            event["first_step"], y,
+            c=colors.get(target_bloc, "gray"),
+            s=max(20, min(100, event["total_uses"] * 10)),
+            alpha=0.7,
+            edgecolors="black",
+            linewidths=0.5,
+            zorder=3,
+        )
+
+    ax.set_yticks(range(len(all_words)))
+    ax.set_yticklabels(list(reversed(all_words)), fontsize=7)
+    ax.set_xlabel("Step")
+    ax.set_xlim(0, max_step + 1)
+    ax.set_title("Vocabulary Propagation: Crossover Events")
+
+    for i, word in enumerate(reversed(all_words)):
+        src = word_source[word]
+        ax.get_yticklabels()[i].set_color(colors.get(src, "black"))
+
+    legend_handles = []
+    for bloc in all_blocs:
+        model = bloc_model_map.get(bloc, "?")
+        label = f"{bloc} ({model})"
+        handle = plt.Line2D([0], [0], marker='o', color='w',
+                            markerfacecolor=colors[bloc],
+                            markersize=8, label=label)
+        legend_handles.append(handle)
+    ax.legend(handles=legend_handles, loc="upper right", fontsize=8)
+
+    ax.grid(axis="x", alpha=0.3)
+    plt.tight_layout()
+    png_path = os.path.join(output_dir, "vocab_propagation.png")
+    fig.savefig(png_path, dpi=150)
+    plt.close(fig)
+    print(f"Chart written to {png_path}")
+
+
 def write_report(
     output_dir: str,
     distinctive: Dict[str, List[Tuple[str, float]]],
@@ -253,6 +339,14 @@ def main():
     )
 
     write_report(args.run_dir, distinctive, events)
+
+    bloc_model_map = load_bloc_model_map(args.run_dir)
+    max_step = 0
+    for record in memory_data:
+        if record["step"] > max_step:
+            max_step = record["step"]
+    render_chart(args.run_dir, distinctive, events, bloc_model_map, max_step)
+
     print(f"Report written to {args.run_dir}/vocab_report.md")
     print(f"Events CSV written to {args.run_dir}/vocab_events.csv")
     print(f"Distinctive words per bloc: {', '.join(f'{b}={len(w)}' for b, w in distinctive.items())}")
