@@ -1,0 +1,66 @@
+{
+  "run_name": "mvp_demo",
+  "config": {
+    "simulation": {
+      "duration": 30,
+      "half_space_size": 25,
+      "seed": 42,
+      "run_name": "mvp_demo"
+    },
+    "blocs": [
+      {
+        "name": "alpha",
+        "model": "qwen2.5:3b",
+        "base_url": "http://localhost:11434",
+        "num_agents": 4
+      },
+      {
+        "name": "beta",
+        "model": "gemma3:4b",
+        "base_url": "http://localhost:11434",
+        "num_agents": 4
+      },
+      {
+        "name": "neutral",
+        "model": "llama3.2:3b",
+        "base_url": "http://localhost:11434",
+        "num_agents": 4
+      }
+    ],
+    "agents": {
+      "communication_radius": 5,
+      "memory_limit": 20,
+      "memory_size": 5,
+      "message_history_limit": 10,
+      "message_context_size": 3
+    },
+    "places": [
+      {
+        "name": "left_bar",
+        "center_x": -15,
+        "center_y": 0,
+        "half_size": 5,
+        "capacity": 6
+      },
+      {
+        "name": "right_bar",
+        "center_x": 15,
+        "center_y": 0,
+        "half_size": 5,
+        "capacity": 5
+      }
+    ],
+    "llm_defaults": {
+      "temperature": 0.2,
+      "max_tokens": 1024,
+      "timeout_s": 120
+    }
+  },
+  "seed": 42,
+  "start_time": "2026-08-06T12:40:14.209252+00:00",
+  "end_time": "2026-08-06T13:17:11.492818+00:00",
+  "aborted": false,
+  "total_llm_calls": 720,
+  "parse_errors": 0,
+  "parse_error_rate": 0.0
+}

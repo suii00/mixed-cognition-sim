@@ -2,6 +2,14 @@
 
 異なるLLMモデルを混在させたマルチエージェントシミュレーション。混合認知集団における創発的行動を研究するためのエンジン。
 
+エージェントをブロック単位で異なるLLM（Ollama経由）に割り当て、ブロック／モデル情報をエージェント自身には一切開示しない。ブロック間の認知差はモデル重みのみに由来する。プロンプトには数値情報のみを与え、定性評価語・目的示唆を排除することで、行動の自発的組織化を観察する。
+
+![語彙伝播チャート — ブロック固有語彙の越境イベント時系列](output_mvp_demo/vocab_propagation.png)
+
+> 3系統×4体×30step（qwen2.5:3b / gemma3:4b / llama3.2:3b）。横軸=step、Y軸=各ブロックの固有語彙、ドット=他ブロックでの初出使用。色は受領側ブロック。
+
+![世界スナップショット GIF — 30ステップのエージェント移動](output_mvp_demo/world.gif)
+
 ## クレジットと系譜
 
 数値情報のみを与え定性評価を排除する観察パラダイムは、AUTOMATA ハッカソン
@@ -14,10 +22,6 @@ Vol.1 課題 [ryukih/llm-agents-simulation](https://github.com/ryukih/llm-agents
 ない。4フェーズ実行順序・通信制約・jsonl フィールド名は、Vol.1 で筆者が構築した
 [観察ツールとハルシネーション分類](https://github.com/suii00/2d-multi-places-simulation-on-fire-public)
 を適用可能にするため、意図的に互換を保っている。
-
-本プロジェクトの独自点: エージェントをブロック単位で異なる LLM に割り当て、
-ブロック／モデル情報をエージェント自身には一切開示しない。ブロック間の差は
-モデル重みのみに由来する。
 
 ## 概要
 
@@ -32,7 +36,7 @@ Vol.1 課題 [ryukih/llm-agents-simulation](https://github.com/ryukih/llm-agents
 
 - Python 3.10+
 - Ollama がローカル（または設定したエンドポイント）で稼働していること
-- 依存パッケージ: `requests`, `pyyaml`
+- 依存パッケージ: `requests`, `pyyaml`, `matplotlib`, `pillow`
 
 ```bash
 pip install -r requirements.txt
@@ -45,6 +49,13 @@ python main.py --config configs/smoke_local.yaml
 ```
 
 出力は `output_<run_name>/` に書き出されます。
+
+### 可視化ツール
+
+```bash
+python tools/vocab_metrics.py output_mvp_demo    # 語彙伝播レポート + チャートPNG
+python tools/render_world.py output_mvp_demo      # 世界スナップショットPNG + GIF
+```
 
 ## Config スキーマ
 
@@ -91,11 +102,3 @@ llm_defaults:
 - **memory_reasoning.jsonl**: `{step, agent_id, bloc, model, position, action, direction, memory, reasoning}`
 - **run_meta.json**: config全文スナップショット、シード、開始/終了時刻、パース失敗率
 - **parse_errors.jsonl**: `{step, agent_id, phase, raw_output}` — JSONパース失敗時の生出力
-
-## 語彙伝播メトリクス
-
-```bash
-python tools/vocab_metrics.py output_smoke_local
-```
-
-`vocab_report.md`（ブロック別固有語彙表＋越境イベント時系列）と `vocab_events.csv` を生成します。
