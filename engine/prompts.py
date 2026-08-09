@@ -1,37 +1,37 @@
 PHASE1_MESSAGE_PROMPT = """\
-You are Agent {agent_id} in a 2D grid world.
-The grid ranges from ({neg_s}, {neg_s}) to ({pos_s}, {pos_s}).
-Your current position is ({x}, {y}).
+あなたは2Dグリッド世界にいるエージェント{agent_id}です。
+グリッドの範囲は ({neg_s}, {neg_s}) から ({pos_s}, {pos_s}) までです。
+現在の位置は ({x}, {y}) です。
 
-Known locations:
+既知の場所:
 {places_info}
 
 {occupancy_info}\
 {memory_section}\
 {messages_section}\
 
-Decide what message to send to nearby agents. You may send an empty string if you have nothing to say.
+近くのエージェントに送るメッセージを決めてください。何も言うことがなければ空文字列でも構いません。
 
-Respond with JSON only:
-{{"message": "<your message text>", "reasoning": "<your internal reasoning>"}}\
+以下のJSON形式のみで回答してください:
+{{"message": "<メッセージ内容>", "reasoning": "<あなたの内部推論>"}}\
 """
 
 PHASE3_ACTION_PROMPT = """\
-You are Agent {agent_id} in a 2D grid world.
-The grid ranges from ({neg_s}, {neg_s}) to ({pos_s}, {pos_s}).
-Your current position is ({x}, {y}).
+あなたは2Dグリッド世界にいるエージェント{agent_id}です。
+グリッドの範囲は ({neg_s}, {neg_s}) から ({pos_s}, {pos_s}) までです。
+現在の位置は ({x}, {y}) です。
 
-Known locations:
+既知の場所:
 {places_info}
 
 {occupancy_info}\
 {memory_section}\
 {messages_section}\
 
-Decide your next action. You can move one step in a cardinal direction or stay.
+次の行動を決めてください。上下左右に1マス移動するか、その場に留まることができます。
 
-Respond with JSON only:
-{{"action": "move" or "stay", "direction": "up" or "down" or "left" or "right", "memory": "<a note to your future self>", "reasoning": "<your internal reasoning>"}}\
+以下のJSON形式のみで回答してください:
+{{"action": "move" または "stay", "direction": "up" または "down" または "left" または "right", "memory": "<未来の自分へのメモ>", "reasoning": "<あなたの内部推論>"}}\
 """
 
 
@@ -39,18 +39,18 @@ def format_places_info(places) -> str:
     lines = []
     for p in places:
         lines.append(
-            f"- {p.name}: center ({p.center_x}, {p.center_y}), "
-            f"extends from ({p.x_min}, {p.y_min}) to ({p.x_max}, {p.y_max})"
+            f"- {p.name}: 中心 ({p.center_x}, {p.center_y}), "
+            f"範囲 ({p.x_min}, {p.y_min}) から ({p.x_max}, {p.y_max})"
         )
-    return "\n".join(lines) if lines else "None"
+    return "\n".join(lines) if lines else "なし"
 
 
 def format_occupancy_info(place, agent_count: int) -> str:
     if place is None:
         return ""
     return (
-        f"You are inside {place.name}. "
-        f"Current occupants: {agent_count}/{place.capacity}.\n"
+        f"あなたは{place.name}の中にいます。"
+        f"現在の入場者数: {agent_count}/{place.capacity}\n"
     )
 
 
@@ -58,16 +58,16 @@ def format_memory_section(memories) -> str:
     if not memories:
         return ""
     lines = "\n".join(f"- {m}" for m in memories)
-    return f"\nYour recent memories:\n{lines}\n"
+    return f"\n最近の記憶:\n{lines}\n"
 
 
 def format_messages_section(messages) -> str:
     if not messages:
         return ""
     lines = "\n".join(
-        f"- Agent {m['sender_id']}: {m['message']}" for m in messages
+        f"- エージェント{m['sender_id']}: {m['message']}" for m in messages
     )
-    return f"\nRecent messages received:\n{lines}\n"
+    return f"\n最近受信したメッセージ:\n{lines}\n"
 
 
 def build_phase1_prompt(agent_id, x, y, half_space_size,
