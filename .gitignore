@@ -3,3 +3,5 @@ __pycache__/
 output_*/
 !output_mvp_demo/
 renamed_run_dir/
+
+*_local.md
