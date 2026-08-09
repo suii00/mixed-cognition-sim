@@ -12,9 +12,8 @@
 
 ## クレジットと系譜
 
-数値情報のみを与え定性評価を排除する観察パラダイムは、AUTOMATA ハッカソン
-Vol.1 課題 [ryukih/llm-agents-simulation](https://github.com/ryukih/llm-agents-simulation)
-（GPL-3.0）に由来し、Vol.2 では公式デモ
+数値情報のみを与え定性評価を排除する観察パラダイムは、シンギュラボ ハッカソン
+Vol.1 課題（GPL-3.0）に由来し、AUTOMATA ハッカソン Vol.2 では公式デモ
 [ryukih/SD-Hackathon-2026DEMO](https://github.com/ryukih/SD-Hackathon-2026DEMO)
 （Apache-2.0, © 2026 Dr. Ryuki HYODO / SpaceData Inc.）として提供されている。
 
