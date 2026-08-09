@@ -19,7 +19,7 @@ Vol.1 課題（GPL-3.0）に由来し、AUTOMATA ハッカソン Vol.2 では公
 
 本リポジトリは設計仕様書からのスクラッチ実装であり、上記からのコード流用は
 ない。4フェーズ実行順序・通信制約・jsonl フィールド名は、Vol.1 で筆者が構築した
-[観察ツールとハルシネーション分類](https://github.com/suii00/2d-multi-places-simulation-on-fire-public)
+[suii00/2d-multi-places-simulation-on-fire-public](https://github.com/suii00/2d-multi-places-simulation-on-fire-public)
 を適用可能にするため、意図的に互換を保っている。
 
 ## 概要
