@@ -5,8 +5,14 @@ import json
 import math
 import os
 import re
+import unicodedata
 from collections import defaultdict
 from typing import Dict, List, Set, Tuple
+
+try:
+    from janome.tokenizer import Tokenizer as JanomeTokenizer
+except ImportError:  # English-only runs can still be analyzed without Janome.
+    JanomeTokenizer = None
 
 STOP_WORDS = {
     "a", "an", "the", "is", "are", "was", "were", "be", "been", "being",
@@ -29,12 +35,67 @@ STOP_WORDS = {
     "action", "current", "grid", "world", "location",
 }
 
+JAPANESE_STOP_WORDS = {
+    "エージェント", "移動", "滞在", "停止", "左", "右", "上", "下",
+    "位置", "メッセージ", "方向", "記憶", "推論", "行動", "現在",
+    "グリッド", "世界", "場所", "マス", "ステップ", "する", "ある",
+    "いる", "なる", "できる", "必要", "可能", "また", "さらに",
+    "特に", "まだ", "すでに", "最も", "前", "後", "次", "同じ",
+    "同様", "すべて", "両方", "それぞれ", "他",
+}
+
+JAPANESE_RE = re.compile(
+    r"[\u3005\u3007\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff]"
+)
+ENGLISH_TOKEN_RE = re.compile(r"[a-z][a-z0-9]*(?:_[a-z0-9]+)*")
+JAPANESE_CONTENT_POS = {"名詞", "動詞", "形容詞", "副詞"}
+JAPANESE_EXCLUDED_SUBPOS = {"非自立", "代名詞", "数", "接尾"}
+_japanese_tokenizer = None
+
+
+def _tokenize_japanese(text: str) -> List[str]:
+    global _japanese_tokenizer
+
+    if JanomeTokenizer is None:
+        raise RuntimeError(
+            "日本語の解析には Janome が必要です。"
+            "`python -m pip install -r requirements.txt` を実行してください。"
+        )
+    if _japanese_tokenizer is None:
+        _japanese_tokenizer = JanomeTokenizer()
+
+    tokens: List[str] = []
+    for token in _japanese_tokenizer.tokenize(text):
+        surface = token.surface
+        if not JAPANESE_RE.search(surface):
+            continue
+
+        pos = token.part_of_speech.split(",")
+        if pos[0] not in JAPANESE_CONTENT_POS:
+            continue
+        if any(part in JAPANESE_EXCLUDED_SUBPOS for part in pos[1:3]):
+            continue
+
+        base_form = token.base_form
+        word = surface if base_form == "*" else base_form
+        word = unicodedata.normalize("NFKC", word).lower().strip()
+        if word and word not in JAPANESE_STOP_WORDS:
+            tokens.append(word)
+    return tokens
+
 
 def tokenize(text: str) -> List[str]:
-    text = text.lower()
-    text = re.sub(r"[^a-z\s]", "", text)
-    tokens = text.split()
-    return [t for t in tokens if t not in STOP_WORDS and len(t) > 2]
+    """Tokenize mixed Japanese/English text into comparable content words."""
+    normalized = unicodedata.normalize("NFKC", text).lower()
+
+    english_tokens = [
+        token for token in ENGLISH_TOKEN_RE.findall(normalized)
+        if token not in STOP_WORDS and len(token) > 2
+    ]
+    japanese_tokens = (
+        _tokenize_japanese(normalized) if JAPANESE_RE.search(normalized) else []
+    )
+    return english_tokens + japanese_tokens
 
 
 def load_run_data(run_dir: str) -> Tuple[Dict[int, str], List[Dict], List[Dict]]:
@@ -212,6 +273,22 @@ def render_chart(
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    from matplotlib import font_manager
+
+    installed_fonts = {font.name for font in font_manager.fontManager.ttflist}
+    for font_name in (
+        "Yu Gothic", "Meiryo", "MS Gothic", "Noto Sans CJK JP",
+        "Noto Sans JP", "IPAexGothic", "IPAGothic",
+    ):
+        if font_name in installed_fonts:
+            plt.rcParams["font.family"] = font_name
+            break
+    else:
+        print(
+            "警告: 日本語フォントが見つかりません。"
+            "チャート内の日本語が正しく表示されない可能性があります。"
+        )
+    plt.rcParams["axes.unicode_minus"] = False
 
     all_blocs = sorted(distinctive.keys())
     colors = {}
@@ -250,9 +327,9 @@ def render_chart(
 
     ax.set_yticks(range(len(all_words)))
     ax.set_yticklabels(list(reversed(all_words)), fontsize=7)
-    ax.set_xlabel("Step")
+    ax.set_xlabel("ステップ")
     ax.set_xlim(0, max_step + 1)
-    ax.set_title("Vocabulary Propagation: Crossover Events")
+    ax.set_title("語彙伝搬: ブロック間の越境イベント")
 
     for i, word in enumerate(reversed(all_words)):
         src = word_source[word]
@@ -273,7 +350,7 @@ def render_chart(
     png_path = os.path.join(output_dir, "vocab_propagation.png")
     fig.savefig(png_path, dpi=150)
     plt.close(fig)
-    print(f"Chart written to {png_path}")
+    print(f"チャートを書き出しました: {png_path}")
 
 
 def write_report(
@@ -283,22 +360,25 @@ def write_report(
 ) -> None:
     report_path = os.path.join(output_dir, "vocab_report.md")
     with open(report_path, "w", encoding="utf-8") as f:
-        f.write("# Vocabulary Propagation Report\n\n")
+        f.write("# 語彙伝搬レポート\n\n")
 
         for bloc, words in sorted(distinctive.items()):
-            f.write(f"## Bloc: {bloc}\n\n")
-            f.write("| Rank | Word | Log-Odds |\n")
-            f.write("|------|------|----------|\n")
+            f.write(f"## ブロック: {bloc}\n\n")
+            f.write("| 順位 | 語彙 | 対数オッズ |\n")
+            f.write("|------|------|------------|\n")
             for i, (word, score) in enumerate(words, 1):
                 f.write(f"| {i} | {word} | {score:.3f} |\n")
             f.write("\n")
 
-        f.write("## Crossover Events\n\n")
+        f.write("## 越境イベント\n\n")
         if not events:
-            f.write("No crossover events detected.\n")
+            f.write("越境イベントは検出されませんでした。\n")
         else:
-            f.write("| Source Bloc | Word | Target Bloc | First Step | Total Uses |\n")
-            f.write("|------------|------|-------------|------------|------------|\n")
+            f.write(
+                "| 発信元ブロック | 語彙 | 伝搬先ブロック | "
+                "初出ステップ | 使用回数 |\n"
+            )
+            f.write("|----------------|------|----------------|--------------|----------|\n")
             for e in events:
                 f.write(
                     f"| {e['source_bloc']} | {e['word']} | {e['target_bloc']} "
@@ -318,21 +398,26 @@ def write_report(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Vocabulary propagation metrics"
+        description="語彙伝搬メトリクスを集計します"
     )
-    parser.add_argument("run_dir", help="Path to simulation output directory")
+    parser.add_argument("run_dir", help="シミュレーション出力ディレクトリ")
     args = parser.parse_args()
 
     if not os.path.isdir(args.run_dir):
-        print(f"Error: {args.run_dir} is not a directory")
+        print(f"エラー: ディレクトリが見つかりません: {args.run_dir}")
         return
 
     agent_bloc_map, messages_data, memory_data = load_run_data(args.run_dir)
     if not agent_bloc_map:
-        print("No data found in run directory")
+        print("実行ディレクトリに分析対象データがありません")
         return
 
-    bloc_freq = compute_bloc_frequencies(agent_bloc_map, messages_data, memory_data)
+    try:
+        bloc_freq = compute_bloc_frequencies(
+            agent_bloc_map, messages_data, memory_data
+        )
+    except RuntimeError as error:
+        parser.error(str(error))
     distinctive = compute_distinctive_words(bloc_freq)
     events = compute_crossover_events(
         distinctive, agent_bloc_map, messages_data, memory_data
@@ -347,10 +432,13 @@ def main():
             max_step = record["step"]
     render_chart(args.run_dir, distinctive, events, bloc_model_map, max_step)
 
-    print(f"Report written to {args.run_dir}/vocab_report.md")
-    print(f"Events CSV written to {args.run_dir}/vocab_events.csv")
-    print(f"Distinctive words per bloc: {', '.join(f'{b}={len(w)}' for b, w in distinctive.items())}")
-    print(f"Crossover events: {len(events)}")
+    print(f"レポートを書き出しました: {args.run_dir}/vocab_report.md")
+    print(f"イベントCSVを書き出しました: {args.run_dir}/vocab_events.csv")
+    print(
+        "ブロック別の固有語彙数: "
+        + ", ".join(f"{b}={len(words)}" for b, words in distinctive.items())
+    )
+    print(f"越境イベント数: {len(events)}")
 
 
 if __name__ == "__main__":
