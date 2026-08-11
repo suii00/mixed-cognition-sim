@@ -1,5 +1,10 @@
 __pycache__/
 *.pyc
 output_*/
+
 !output_mvp_demo/
+!output_exp_sarashina_qwen_phi
+
 renamed_run_dir/
+
+*_local.md
