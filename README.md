@@ -36,7 +36,7 @@ Vol.1 課題 [ryukih/llm-agents-simulation](https://github.com/ryukih/llm-agents
 
 - Python 3.10+
 - Ollama がローカル（または設定したエンドポイント）で稼働していること
-- 依存パッケージ: `requests`, `pyyaml`, `matplotlib`, `pillow`
+- 依存パッケージ: `requests`, `pyyaml`, `matplotlib`, `pillow`, `janome`
 
 ```bash
 pip install -r requirements.txt
@@ -56,6 +56,9 @@ python main.py --config configs/smoke_local.yaml
 python tools/vocab_metrics.py output_mvp_demo    # 語彙伝播レポート + チャートPNG
 python tools/render_world.py output_mvp_demo      # 世界スナップショットPNG + GIF
 ```
+
+`vocab_metrics.py` は英語と日本語の混在テキストに対応しています。日本語は
+Janomeで形態素解析し、活用語を原形にそろえて集計します。
 
 ## Config スキーマ
 
