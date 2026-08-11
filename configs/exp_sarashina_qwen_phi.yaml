@@ -26,8 +26,8 @@ agents:
   message_context_size: 3
 
 places:
-  - {name: left_bar, center_x: -15, center_y: 0, half_size: 5, capacity: 6}
-  - {name: right_bar, center_x: 15, center_y: 0, half_size: 5, capacity: 5}
+  - {name: L_bar, center_x: -15, center_y: 0, half_size: 5, capacity: 6}
+  - {name: R_bar, center_x: 15, center_y: 0, half_size: 5, capacity: 5}
 
 llm_defaults:
   temperature: 0.2
