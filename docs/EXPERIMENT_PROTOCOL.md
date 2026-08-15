@@ -162,20 +162,46 @@ The metric specification must preserve these mandatory invariants:
 - Later data may not select vocabulary or thresholds used to classify earlier events.
 - `reasoning` is model-generated explanation, not verified internal reasoning truth.
 
+Gate 1 implementation-candidate evidence (not independently checked or frozen):
+
+- Metric version: `metric-v2.0.0`
+- Normative specification: `docs/METRIC_V2_SPEC.md`
+- Specification SHA-256:
+  `972a225f5b1ef01fd1e17ae2748f4b4008d392d6513f8339879ccf863ba2b27a`
+- Implementation commit:
+  `d7cd66f89a57f98968ce231146f0db919c802b7e`
+- Candidate registry schema: `candidate-registry-v1.0.0`
+- Derived schema: `metric-derived-v1.0.0`
+- Normalization: `nfkc-casefold-token-sequence-v1`
+- Test-fixture-only registry SHA-256:
+  `42b7bac1b4038f21e4fccf90ef5bc25b8fdeba6f5e237f5658e2dc3d8393e913`
+  (not a production registry and not empirical evidence)
+
 | Metric/event | Specification reference | Allowed raw inputs | Excluded inputs | Temporal rule | Counting unit/denominator | Censoring rule |
 |---|---|---|---|---|---|---|
-| Innovation | `<UNFILLED>` | `<UNFILLED>` | `<UNFILLED>` | `<UNFILLED>` | `<UNFILLED>` | `<UNFILLED>` |
-| Exposure | `<UNFILLED>` | `<UNFILLED>` | `<UNFILLED>` | `<UNFILLED>` | `<UNFILLED>` | `<UNFILLED>` |
-| Reuse | `<UNFILLED>` | `<UNFILLED>` | `<UNFILLED>` | `<UNFILLED>` | `<UNFILLED>` | `<UNFILLED>` |
-| Second hop | `<UNFILLED>` | `<UNFILLED>` | `<UNFILLED>` | `<UNFILLED>` | `<UNFILLED>` | `<UNFILLED>` |
-| Behavioral association | `<UNFILLED>` | `<UNFILLED>` | `<UNFILLED>` | `<UNFILLED>` | `<UNFILLED>` | `<UNFILLED>` |
+| Innovation | `docs/METRIC_V2_SPEC.md` §6; `metric-v2.0.0` | `phase1_raw.jsonl: parsed.message` | raw output, reasoning, delivery-as-receiver-use, memory/Phase 3, prompt/config strings | Minimum self-use step; unique or simultaneous origin | One event per present registered expression; absent expressions retained in summary | Not applicable; absent through expected final step remains absent |
+| Exposure | `docs/METRIC_V2_SPEC.md` §7; `metric-v2.0.0` | `messages.jsonl: step,sender_id,receiver_ids,message`, cross-checked to sender Phase 1 message | reasoning, memory, prompt/config strings | Delivery after Phase 1 at its recorded step | One event per registered expression and receiver delivery | All observed deliveries through expected final step retained |
+| Reuse | `docs/METRIC_V2_SPEC.md` §8; `metric-v2.0.0` | Exposure records plus receiver's later `phase1_raw.jsonl: parsed.message` | delivery as use, same/prior self-use, raw output, reasoning, memory/Phase 3 | Receiver self-use must be strictly later than first exposure | One status per exposed expression/receiver pair; all eligible reused and eligible non-reused pairs form the overall denominator | Eligible non-reuse retained with `censor_step = expected_steps`; zero denominator gives JSON `null` |
+| Second hop | `docs/METRIC_V2_SPEC.md` §9; `metric-v2.0.0` | Unique innovation, first-hop reuse, same-step relay delivery, and target's later Phase 1 reuse events | simultaneous origin, ambiguous first parent, prior/same-step target use, third or later hops | `S` origin → later `R` reuse/delivery → later `T` reuse; `S/R/T` distinct | One event per fully attributable `S/R/T` chain; secondary descriptive count | No event when any required link is absent or ambiguous |
+| Behavioral association | Deferred; not implemented by `metric-v2.0.0` | None | Spatial/action output and all causal or behavioral inference | Not applicable | No denominator or claim | Not applicable |
 
-- Candidate/threshold discovery data and procedure: `<UNFILLED>`
-- Normalization/exclusion artifact version and hash: `<UNFILLED>`
-- Ambiguous/tied/simultaneous-origin rule: `<UNFILLED>`
-- Semantic-match rule or `not used in primary metric`: `<UNFILLED>`
-- Frozen registry/threshold artifact and hash: `<UNFILLED>`
-- Future-information regression-test reference: `<UNFILLED>`
+- Candidate/threshold discovery data and procedure: production discovery is
+  `NOT YET FROZEN`; the implementation accepts only an externally fixed,
+  hash-pinned registry and performs no target-run discovery.
+- Normalization/exclusion artifact version and hash: registry schema
+  `candidate-registry-v1.0.0`; production artifact/hash `NOT YET FROZEN`.
+- Ambiguous/tied/simultaneous-origin rule: simultaneous origin is retained but
+  excluded from source-attributed chains; mixed first-exposure relation is
+  retained but excluded from relation-specific rates; multiple first-parent
+  senders prevent second-hop attribution.
+- Semantic-match rule or `not used in primary metric`: `not used in primary metric`.
+- Frozen registry/threshold artifact and hash: `NOT YET FROZEN`.
+- Future-information regression-test reference:
+  `tests/test_metric_v2.py::MetricV2Tests::test_unregistered_future_text_does_not_change_registered_events`
+  and unsafe discovery-provenance registry fixtures at implementation commit
+  `d7cd66f89a57f98968ce231146f0db919c802b7e`.
+- Behavioral association is deferred. No causal or behavioral claim is
+  produced by `metric-v2.0.0`.
 
 ## 9. Analysis plan
 
@@ -200,12 +226,27 @@ The metric specification must preserve these mandatory invariants:
 
 ## 11. Derived outputs and traceability
 
-- Fresh, versioned derived-output path and no-overwrite rule: `<UNFILLED>`
-- Derived artifact list/schema: `<UNFILLED>`
+- Fresh, versioned derived-output path and no-overwrite rule:
+  `derived/<metric_version>/<run_id>/`; the final leaf is exclusively created
+  with `exist_ok=False`; collision fails without suffix, append, reuse, or
+  overwrite; a derived root resolving inside the raw run is rejected.
+- Derived artifact list/schema: `metric-derived-v1.0.0` with
+  `analysis_meta.json`, `events.jsonl`, `receiver_expression_status.jsonl`,
+  `summary.json`, and `derived_manifest.json`.
 - Mapping from each empirical claim/event to run ID, config hash, source commit,
-  raw record/hash, and metric version: `<UNFILLED>`
-- Deterministic ordering/reproduction check: `<UNFILLED>`
+  raw record/hash, and metric version: analysis metadata preserves run ID,
+  source Git SHA, config/prompt/protocol/metric provenance, registry/spec hashes,
+  and the raw manifest; events preserve one-based raw line number, exact-line
+  SHA-256 including newline, exact-message SHA-256, and deterministic event IDs.
+- Deterministic ordering/reproduction check: canonical compact JSON with sorted
+  keys and fixed event/pair ordering; different derived roots are byte-identical
+  in `test_different_derived_roots_are_byte_identical`.
 - Batch manifest including completed, null, negative, failed, and aborted runs: `<UNFILLED>`
+
+Raw runs are immutable inputs. Input validation and all derived bytes are built
+before the final leaf claim. `derived_manifest.json` hashes the other required
+derived files; it is not a replacement for the still-unfilled multi-run batch
+manifest.
 
 ## 12. Pre-run readiness gates
 
@@ -231,15 +272,25 @@ The metric specification must preserve these mandatory invariants:
 | Run collision/no-overwrite | Sequential repeat and same-ID process-race fixtures | Repeat exits nonzero before LLM with all existing hashes unchanged; exactly one process wins the race | `tests/test_run_lifecycle.py`; verified at `86fad23...` | `<checker>` |
 | Run lifecycle/abort | completed/aborted/failed lifecycle fixtures and atomic-finalize fixtures | Terminal state is explicit and failed/aborted runs cannot silently appear completed | `tests/test_run_lifecycle.py`; `tests/test_validate_run.py`; verified at `86fad23...` | `<checker>` |
 | Same-instance one-shot execution | completed/aborted/failed rerun fixtures and concurrent-thread ownership fixture | Repeats fail before LLM with files/state/RNG/lifecycle unchanged; exactly one concurrent `run()` owns execution | `tests/test_run_lifecycle.py`; verified at `86fad23bc1cddf624550c044348566dc5c212bc7`; 78/78 PASS on Windows and Linux | `<checker>` |
-| Run lifecycle/abort | `<UNFILLED>` | `<UNFILLED>` | `<UNFILLED>` | `<UNFILLED>` |
-| Untrusted model-output non-execution | `<UNFILLED>` | `<UNFILLED>` | `<UNFILLED>` | `<UNFILLED>` |
-| Additive/backward compatibility | `<UNFILLED>` | `<UNFILLED>` | `<UNFILLED>` | `<UNFILLED>` |
-| Exposure differs from reuse | `<UNFILLED>` | `<UNFILLED>` | `<UNFILLED>` | `<UNFILLED>` |
-| Future-information exclusion | `<UNFILLED>` | `<UNFILLED>` | `<UNFILLED>` | `<UNFILLED>` |
-| Derived-output collision/provenance | `<UNFILLED>` | `<UNFILLED>` | `<UNFILLED>` | `<UNFILLED>` |
+| Untrusted model-output non-execution | Shell/Python/URL-like message fixture | Text is tokenized only; no command, code, file creation, or URL fetch | `test_untrusted_message_is_only_text_and_executes_nothing`; 30/30 targeted PASS at implementation commit `d7cd66f...` | `<pending independent checker>` |
+| Additive/backward compatibility | Full unit suite plus protected-path diffs | Existing MVP remains unchanged and all existing tests pass | 108/108 PASS; `engine`, `tools/vocab_metrics.py`, and `output_mvp_demo` diffs empty; prompt SHA unchanged | `<pending independent checker>` |
+| Exposure differs from reuse | Delivery-only, same-step, prior-use, multiple-exposure fixtures | Delivery-only is eligible non-reuse; same/prior use excluded; later receiver Phase 1 self-use yields at most one reuse | `tests/test_metric_v2.py`; 30/30 targeted PASS | `<pending independent checker>` |
+| Future-information exclusion | Fixed-registry future-text and unsafe discovery-provenance fixtures | Unregistered later text cannot become a candidate or change registered events/status; unsafe registry rejected | `test_unregistered_future_text_does_not_change_registered_events`; registry validation fixtures | `<pending independent checker>` |
+| Derived-output collision/provenance | Sequential collision, spawn-process Barrier race, raw-line hash, and raw-directory hash fixtures | Exactly one process owns a fresh leaf; repeats collide; raw/derived files remain immutable; references match source bytes | `tests/test_metric_v2.py`; process race one success/one collision; raw before/after hashes equal | `<pending independent checker>` |
+| Fixed candidate registry validation | Registry schema/hash and invalid-registry fixtures | Expected SHA required; duplicates, empty tokens, exclusion conflicts, wrong version, unknown top-level fields, and unsafe discovery flags rejected before leaf claim | Registry validation tests in `tests/test_metric_v2.py` | `<pending independent checker>` |
+| Deterministic derived serialization | Two-derived-root byte equality and manifest fixtures | All five required files deterministic; manifest counts and hashes match exact bytes | `test_different_derived_roots_are_byte_identical`; `test_analysis_metadata_and_manifest_are_complete` | `<pending independent checker>` |
 
-- Readiness verdict (`NOT READY` until every required gate has evidence): `<UNFILLED>`
-- Approved run-start window: `<UNFILLED>`
+- Gate 1 implementation candidate: completed at
+  `d7cd66f89a57f98968ce231146f0db919c802b7e`; targeted tests 30/30 PASS
+  in 2.876 s and full suite 108/108 PASS in 5.208 s on the Windows CPU
+  development host; `compileall` and `git diff --check` PASS. This is pending
+  independent checking and is not a freeze record.
+- Readiness verdict (`NOT READY` until every required gate has evidence):
+  `NOT READY`. Gate 1 implementation candidate completed, but production
+  registry, experimental conditions, pilot seeds, communication intervention,
+  parallel transport/backend smoke, matrix runner, and run-start approval
+  remain outstanding.
+- Approved run-start window: `NO`; explicit approval remains outstanding.
 
 ## 13. Amendments and deviations
 
