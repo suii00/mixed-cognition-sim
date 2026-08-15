@@ -259,6 +259,7 @@ class Simulation:
                 })
 
         # Phase 3: action decision
+        phase3_actions: Dict[int, Tuple[str, str]] = {}
         for agent in self.agents:
             self.run_lifecycle.set_context(step, "phase3", agent.agent_id)
             place = self.world.get_place_for(*agent.position)
@@ -309,8 +310,12 @@ class Simulation:
             })
             self.run_lifecycle.observe_agent(agent.agent_id)
 
-            # Phase 4: execute movement
+            phase3_actions[agent.agent_id] = (action, direction)
+
+        # Phase 4: execute movement only after every Phase 3 decision completes.
+        for agent in sorted(self.agents, key=lambda item: item.agent_id):
             self.run_lifecycle.set_context(step, "phase4", agent.agent_id)
+            action, direction = phase3_actions[agent.agent_id]
             if action == "move" and direction:
                 x, y = agent.position
                 if direction == "up":
@@ -323,7 +328,7 @@ class Simulation:
                     x += 1
                 agent.position = self.world.clamp(x, y)
 
-            print(f"  Phase 3-4: Agent {agent.agent_id} ({agent.bloc}) -> "
+            print(f"  Phase 4: Agent {agent.agent_id} ({agent.bloc}) -> "
                   f"{action} {direction} @ {agent.position}")
 
         self.run_lifecycle.set_context(step, "step_complete", None)

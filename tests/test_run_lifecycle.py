@@ -1,5 +1,6 @@
 import hashlib
 import json
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -84,6 +85,65 @@ def directory_hashes(output_dir: Path) -> dict:
     return hashes
 
 
+def read_jsonl(path: Path) -> list[dict]:
+    with path.open("r", encoding="utf-8") as handle:
+        return [json.loads(line) for line in handle if line.strip()]
+
+
+class ScriptedLLM:
+    """Deterministic test double keyed by phase and agent ID."""
+
+    _AGENT_ID = re.compile(r"^You are Agent (\d+) in a 2D grid world\.")
+
+    def __init__(
+        self,
+        phase3_results: dict[int, dict],
+        before_phase3=None,
+        transport_failure_agents=(),
+        parse_failure_agents=(),
+    ):
+        self.phase3_results = phase3_results
+        self.before_phase3 = before_phase3
+        self.transport_failure_agents = set(transport_failure_agents)
+        self.parse_failure_agents = set(parse_failure_agents)
+
+    @staticmethod
+    def _emit(kwargs, event: str, amount: int = 1) -> None:
+        telemetry = kwargs.get("telemetry")
+        if telemetry is not None:
+            telemetry(event, amount)
+
+    def __call__(self, **kwargs):
+        prompt = kwargs["prompt"]
+        match = self._AGENT_ID.match(prompt)
+        if match is None:
+            raise AssertionError("scripted LLM received an unknown prompt")
+        agent_id = int(match.group(1))
+
+        if "Decide your next action." not in prompt:
+            self._emit(kwargs, "http_attempt")
+            parsed = {"message": "", "reasoning": ""}
+            return parsed, json.dumps(parsed)
+
+        if self.before_phase3 is not None:
+            self.before_phase3(agent_id)
+
+        if agent_id in self.transport_failure_agents:
+            self._emit(kwargs, "http_attempt", 3)
+            self._emit(kwargs, "transport_failure", 3)
+            raise LLMTransportError("scripted Phase 3 transport failure")
+
+        if agent_id in self.parse_failure_agents:
+            self._emit(kwargs, "http_attempt", 2)
+            self._emit(kwargs, "generation_retry")
+            self._emit(kwargs, "syntax_parse_attempt_failure", 2)
+            return None, "not-json"
+
+        self._emit(kwargs, "http_attempt")
+        parsed = self.phase3_results[agent_id]
+        return parsed, json.dumps(parsed)
+
+
 class RunLifecycleTests(unittest.TestCase):
     def setUp(self):
         self.temp_directory = tempfile.TemporaryDirectory()
@@ -120,6 +180,19 @@ class RunLifecycleTests(unittest.TestCase):
             output_root=self.output_root,
             repo_root=REPO_ROOT,
         )
+
+    def new_two_agent_simulation(self, run_id: str) -> Simulation:
+        config = make_config(run_id)
+        config["blocs"][0]["num_agents"] = 2
+        simulation = Simulation(
+            config,
+            output_root=self.output_root,
+            repo_root=REPO_ROOT,
+        )
+        fixed_positions = {0: (-1, 0), 1: (1, 0)}
+        for agent in simulation.agents:
+            agent.position = fixed_positions[agent.agent_id]
+        return simulation
 
     def test_new_run_is_created_and_completed(self):
         with mock.patch("engine.sim.call_ollama", side_effect=successful_llm):
@@ -271,6 +344,185 @@ class RunLifecycleTests(unittest.TestCase):
         self.assertEqual(meta["logical_llm_calls"], 1)
         self.assertEqual(meta["http_attempts"], 3)
         self.assertEqual(meta["transport_failures"], 3)
+
+    def test_phase3_decisions_all_observe_pre_movement_positions(self):
+        simulation = self.new_two_agent_simulation("phase3-shared-snapshot")
+        initial_positions = simulation._get_positions()
+        observed_positions = []
+        actions = {
+            0: {
+                "action": "move",
+                "direction": "right",
+                "memory": "agent-zero",
+                "reasoning": "",
+            },
+            1: {
+                "action": "move",
+                "direction": "up",
+                "memory": "agent-one",
+                "reasoning": "",
+            },
+        }
+
+        scripted = ScriptedLLM(
+            actions,
+            before_phase3=lambda _agent_id: observed_positions.append(
+                simulation._get_positions()
+            ),
+        )
+        with mock.patch("engine.sim.call_ollama", side_effect=scripted):
+            simulation.run()
+
+        self.assertEqual(
+            observed_positions,
+            [initial_positions, initial_positions],
+        )
+        self.assertEqual(
+            simulation._get_positions(),
+            {0: (0, 0), 1: (1, 1)},
+        )
+
+    def test_phase4_scripted_results_are_iteration_order_invariant(self):
+        forward = self.new_two_agent_simulation("phase4-forward-order")
+        reversed_order = self.new_two_agent_simulation("phase4-reversed-order")
+        reversed_order.agents.reverse()
+        actions = {
+            0: {
+                "action": "move",
+                "direction": "right",
+                "memory": "agent-zero",
+                "reasoning": "zero-reasoning",
+            },
+            1: {
+                "action": "move",
+                "direction": "up",
+                "memory": "agent-one",
+                "reasoning": "one-reasoning",
+            },
+        }
+
+        with mock.patch(
+            "engine.sim.call_ollama",
+            side_effect=ScriptedLLM(actions),
+        ):
+            forward.run()
+        with mock.patch(
+            "engine.sim.call_ollama",
+            side_effect=ScriptedLLM(actions),
+        ):
+            reversed_order.run()
+
+        def state_by_agent(simulation):
+            return {
+                agent.agent_id: {
+                    "position": agent.position,
+                    "memories": list(agent.memories),
+                    "received_messages": list(agent.received_messages),
+                }
+                for agent in simulation.agents
+            }
+
+        self.assertEqual(state_by_agent(forward), state_by_agent(reversed_order))
+        for filename in ("phase1_raw.jsonl", "memory_reasoning.jsonl"):
+            forward_records = sorted(
+                read_jsonl(Path(forward.output_dir) / filename),
+                key=lambda record: (record["step"], record["agent_id"]),
+            )
+            reversed_records = sorted(
+                read_jsonl(Path(reversed_order.output_dir) / filename),
+                key=lambda record: (record["step"], record["agent_id"]),
+            )
+            self.assertEqual(forward_records, reversed_records)
+
+    def test_phase3_transport_failure_applies_no_pending_movements(self):
+        simulation = self.new_two_agent_simulation("phase3-transport-barrier")
+        initial_positions = simulation._get_positions()
+        actions = {
+            0: {
+                "action": "move",
+                "direction": "right",
+                "memory": "pending-move",
+                "reasoning": "",
+            },
+            1: {
+                "action": "stay",
+                "direction": "",
+                "memory": "",
+                "reasoning": "",
+            },
+        }
+
+        with mock.patch(
+            "engine.sim.call_ollama",
+            side_effect=ScriptedLLM(
+                actions,
+                transport_failure_agents={1},
+            ),
+        ):
+            with self.assertRaises(SimulationAbortedError):
+                simulation.run()
+
+        self.assertEqual(simulation._get_positions(), initial_positions)
+        meta = load_meta(Path(simulation.output_dir))
+        self.assertEqual(meta["status"], "aborted")
+        self.assertEqual(meta["failure_phase"], "phase3")
+        self.assertEqual(meta["failure_agent_id"], 1)
+        self.assertEqual(meta["completed_steps"], 0)
+
+    def test_phase3_parse_failure_stays_without_breaking_barrier(self):
+        simulation = self.new_two_agent_simulation("phase3-parse-barrier")
+        initial_positions = simulation._get_positions()
+        observed_positions = []
+        actions = {
+            0: {
+                "action": "move",
+                "direction": "right",
+                "memory": "completed-move",
+                "reasoning": "",
+            },
+        }
+        scripted = ScriptedLLM(
+            actions,
+            before_phase3=lambda _agent_id: observed_positions.append(
+                simulation._get_positions()
+            ),
+            parse_failure_agents={1},
+        )
+
+        with mock.patch("engine.sim.call_ollama", side_effect=scripted):
+            simulation.run()
+
+        self.assertEqual(
+            observed_positions,
+            [initial_positions, initial_positions],
+        )
+        self.assertEqual(
+            simulation._get_positions(),
+            {0: (0, 0), 1: (1, 0)},
+        )
+        parse_errors = read_jsonl(
+            Path(simulation.output_dir) / "parse_errors.jsonl"
+        )
+        self.assertEqual(
+            parse_errors,
+            [{
+                "step": 1,
+                "agent_id": 1,
+                "phase": 3,
+                "raw_output": "not-json",
+            }],
+        )
+        memory_records = {
+            record["agent_id"]: record
+            for record in read_jsonl(
+                Path(simulation.output_dir) / "memory_reasoning.jsonl"
+            )
+        }
+        self.assertEqual(memory_records[1]["action"], "stay")
+        self.assertEqual(memory_records[1]["direction"], "")
+        meta = load_meta(Path(simulation.output_dir))
+        self.assertEqual(meta["status"], "completed")
+        self.assertEqual(meta["syntax_parse_failures"], 1)
 
     def test_unhandled_exception_leaves_failed_meta_and_is_reraised(self):
         simulation = self.new_simulation("unexpected-failure-run")
