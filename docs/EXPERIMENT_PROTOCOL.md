@@ -139,6 +139,17 @@ Evidence class must be one of: `direct observation`, `mechanical derivation`,
 - Regression evidence that each new scenario, model, intervention, or metric is
   additive and does not break existing experiments: `<UNFILLED>`
 
+Mandatory inter-run immutability invariants:
+
+- An existing explicit `run_id` must fail before any LLM call; it must not be
+  renamed, suffixed, appended to, or partially replaced.
+- Automatically generated run IDs must be unique.
+- A rejected repeat attempt must leave every pre-existing run file byte-identical.
+- Concurrent claims for the same run ID must produce exactly one owner and one
+  or more collision failures.
+- Only the owning run may atomically update its documented lifecycle metadata
+  (`running` to `completed`, `aborted`, or `failed`).
+
 ## 8. Frozen metric specification references
 
 The metric specification must preserve these mandatory invariants:
@@ -199,7 +210,8 @@ The metric specification must preserve these mandatory invariants:
 |---|---|---|---|---|
 | Phase barriers | `<UNFILLED>` | `<UNFILLED>` | `<UNFILLED>` | `<UNFILLED>` |
 | Communication boundary | `<UNFILLED>` | `<UNFILLED>` | `<UNFILLED>` | `<UNFILLED>` |
-| Run collision/integrity/abort | `<UNFILLED>` | `<UNFILLED>` | `<UNFILLED>` | `<UNFILLED>` |
+| Run collision/no-overwrite | Sequential repeat and same-ID process-race fixtures | Repeat exits nonzero before LLM with all existing hashes unchanged; exactly one process wins the race | `<UNFILLED>` | `<UNFILLED>` |
+| Run lifecycle/abort | `<UNFILLED>` | `<UNFILLED>` | `<UNFILLED>` | `<UNFILLED>` |
 | Untrusted model-output non-execution | `<UNFILLED>` | `<UNFILLED>` | `<UNFILLED>` | `<UNFILLED>` |
 | Additive/backward compatibility | `<UNFILLED>` | `<UNFILLED>` | `<UNFILLED>` | `<UNFILLED>` |
 | Exposure differs from reuse | `<UNFILLED>` | `<UNFILLED>` | `<UNFILLED>` | `<UNFILLED>` |

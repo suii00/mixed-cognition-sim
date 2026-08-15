@@ -1,5 +1,6 @@
 import hashlib
 import json
+import multiprocessing
 import re
 import tempfile
 import unittest
@@ -142,6 +143,45 @@ class ScriptedLLM:
         self._emit(kwargs, "http_attempt")
         parsed = self.phase3_results[agent_id]
         return parsed, json.dumps(parsed)
+
+
+def claim_run_directory_in_process(
+    config: dict,
+    output_root: str,
+    repo_root: str,
+    start_barrier,
+    result_queue,
+) -> None:
+    """Race one exclusive run-directory claim without probing real hardware."""
+    from engine import provenance
+
+    provenance.collect_git_info = lambda _repo_root=None: {
+        "git_sha": "c" * 40,
+        "git_dirty": False,
+        "git_probe_status": "available",
+        "git_probe_errors": [],
+    }
+    provenance.collect_gpu_info = lambda: {
+        "status": "unavailable",
+        "error": "test_disabled",
+        "driver_version": None,
+        "cuda_version": None,
+        "devices": [],
+    }
+
+    try:
+        start_barrier.wait(timeout=10)
+        lifecycle = provenance.RunLifecycle.create(
+            config,
+            output_root=Path(output_root),
+            repo_root=Path(repo_root),
+        )
+    except provenance.RunCollisionError:
+        result_queue.put(("collision", None))
+    except BaseException as error:
+        result_queue.put(("error", type(error).__name__))
+    else:
+        result_queue.put(("created", lifecycle.meta["logical_llm_calls"]))
 
 
 class RunLifecycleTests(unittest.TestCase):
@@ -305,16 +345,75 @@ class RunLifecycleTests(unittest.TestCase):
         output_dir = self.output_root / "output_fixed-collision-run"
         before = directory_hashes(output_dir)
 
-        with mock.patch("engine.sim.call_ollama") as llm_mock:
-            with self.assertRaises(RunCollisionError):
-                Simulation(
-                    config,
-                    output_root=self.output_root,
-                    repo_root=REPO_ROOT,
-                )
-            llm_mock.assert_not_called()
+        def simulation_in_test_output(loaded_config):
+            return Simulation(
+                loaded_config,
+                output_root=self.output_root,
+                repo_root=REPO_ROOT,
+            )
+
+        with (
+            mock.patch.object(cli_main, "load_config", return_value=config),
+            mock.patch.object(
+                cli_main,
+                "Simulation",
+                side_effect=simulation_in_test_output,
+            ),
+            mock.patch("engine.sim.call_ollama") as llm_mock,
+        ):
+            exit_code = cli_main.main(["--config", "ignored.yaml"])
+
+        self.assertEqual(exit_code, 2)
+        llm_mock.assert_not_called()
 
         self.assertEqual(directory_hashes(output_dir), before)
+
+    def test_concurrent_processes_claim_same_run_id_exactly_once(self):
+        context = multiprocessing.get_context("spawn")
+        start_barrier = context.Barrier(3)
+        result_queue = context.Queue()
+        config = make_config("parallel-collision-run")
+        processes = [
+            context.Process(
+                target=claim_run_directory_in_process,
+                args=(
+                    config,
+                    str(self.output_root),
+                    str(REPO_ROOT),
+                    start_barrier,
+                    result_queue,
+                ),
+            )
+            for _ in range(2)
+        ]
+
+        try:
+            for process in processes:
+                process.start()
+            start_barrier.wait(timeout=10)
+            for process in processes:
+                process.join(timeout=10)
+
+            self.assertTrue(
+                all(not process.is_alive() for process in processes),
+                "run-directory claim process did not terminate",
+            )
+            self.assertTrue(
+                all(process.exitcode == 0 for process in processes),
+                [process.exitcode for process in processes],
+            )
+            outcomes = [result_queue.get(timeout=5) for _ in processes]
+            self.assertCountEqual(
+                outcomes,
+                [("created", 0), ("collision", None)],
+            )
+        finally:
+            for process in processes:
+                if process.is_alive():
+                    process.terminate()
+                process.join(timeout=5)
+            result_queue.close()
+            result_queue.join_thread()
 
     def test_transport_abort_leaves_aborted_meta(self):
         simulation = self.new_simulation("transport-abort-run")
