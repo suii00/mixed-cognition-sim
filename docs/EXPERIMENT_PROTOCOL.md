@@ -350,14 +350,14 @@ replacement for the still-unfilled multi-run batch manifest.
 | Interrupted derived publication | Failure after each of four data writes, during manifest write, after manifest verification, and abrupt spawned-child termination | Final leaf absent until atomic publish; residual staging is ineligible and does not block retry; OS lock releases on process death; retry yields five manifest-valid files | Seven interruption fixtures in `tests/test_metric_v2.py`; all raw hashes unchanged; 39/39 targeted PASS | PASS at frozen `932f531...` |
 | Fixed candidate registry validation | Registry schema/hash and invalid-registry fixtures | Expected SHA required; duplicates, empty tokens, exclusion conflicts, wrong version, unknown top-level fields, and unsafe discovery flags rejected before publication | Registry validation tests in `tests/test_metric_v2.py` | PASS at frozen `932f531...` |
 | Deterministic derived serialization | Two-derived-root byte equality and manifest fixtures | All five required files deterministic; manifest counts and hashes match exact bytes | `test_different_derived_roots_are_byte_identical`; `test_analysis_metadata_and_manifest_are_complete` | PASS at frozen `932f531...` |
-| Worker purity / coordinator-only mutation | Worker-local telemetry blocking fixture and shared-mutation instrumentation | Workers touch no lifecycle, simulation counter, log, agent state, or movement path; coordinator reflects settled facts | `tests/test_phase_parallelism.py`; 19/19 targeted PASS at implementation commit `4f893b3...` | `<pending independent checker>` |
-| Phase 1 batch barrier | All-prompts-before-dispatch, blocked-delivery, reverse-completion, and terminal-failure fixtures | Common step-start snapshot; every request settles before canonical Phase 1 commit or any delivery; terminal failure publishes no Phase 1 result | `tests/test_phase_parallelism.py`; deterministic CPU scripted transports | `<pending independent checker>` |
-| Phase 3 batch barrier | Post-delivery snapshot, blocked-memory/movement, parse, and terminal-failure fixtures | Common post-delivery snapshot; every result settles before memory/log commit; all Phase 3 commits precede movement; terminal failure publishes no Phase 3 result | `tests/test_phase_parallelism.py`; existing lifecycle barrier fixtures retained | `<pending independent checker>` |
-| Concurrency 1/N scripted equivalence | Three-agent, two-step deterministic scripted scenario at concurrency 1 and 3 | Four scientific raw files byte-identical; agent/RNG/counter/observed/manifest state and exact request transcript equal | `test_concurrency_one_and_n_are_deterministically_equivalent` | `<pending independent checker>` |
-| Deterministic result ordering | Reverse worker completion and reversed internal agent-list fixtures | Request/result identity remains mapped; raw logs, lifecycle observation, progress, delivery receiver IDs, state, and movement commit in agent-ID order | `test_reverse_completion_commits_canonical_order`; `test_agent_list_order_is_not_semantic` | `<pending independent checker>` |
-| Transport-failure phase atomicity | Phase 1/3 blocked multi-request failures and multiple-error fixtures | All requests and telemetry settle; no primary log/state partial commit; deterministic minimum failing agent; executor threads release | Gate 2 targeted suite at `4f893b3...` | `<pending independent checker>` |
-| Unexpected-worker-failure handling | Mixed transport/unexpected and multiple-unexpected fixtures | Unexpected error wins over transport, original type is re-raised, minimum unexpected agent fixes context, no partial commit or thread leak | Gate 2 targeted suite at `4f893b3...` | `<pending independent checker>` |
-| Effective concurrency provenance | Omitted/explicit/invalid settings, caller-ownership, persisted snapshot, and config-hash fixtures | Effective positive integer is owned and persisted; invalid types/values rejected; different concurrency changes config hash | Gate 2 targeted suite at `4f893b3...` | `<pending independent checker>` |
+| Worker purity / coordinator-only mutation | Worker-local telemetry blocking fixture and shared-mutation instrumentation | Workers touch no lifecycle, simulation counter, log, agent state, or movement path; coordinator reflects settled facts | `tests/test_phase_parallelism.py`; 19/19 targeted PASS at implementation commit `4f893b3...` | PASS at frozen `34c6b80...` |
+| Phase 1 batch barrier | All-prompts-before-dispatch, blocked-delivery, reverse-completion, and terminal-failure fixtures | Common step-start snapshot; every request settles before canonical Phase 1 commit or any delivery; terminal failure publishes no Phase 1 result | `tests/test_phase_parallelism.py`; deterministic CPU scripted transports | PASS at frozen `34c6b80...` |
+| Phase 3 batch barrier | Post-delivery snapshot, blocked-memory/movement, parse, and terminal-failure fixtures | Common post-delivery snapshot; every result settles before memory/log commit; all Phase 3 commits precede movement; terminal failure publishes no Phase 3 result | `tests/test_phase_parallelism.py`; existing lifecycle barrier fixtures retained | PASS at frozen `34c6b80...` |
+| Concurrency 1/N scripted equivalence | Three-agent, two-step deterministic scripted scenario at concurrency 1 and 3 | Four scientific raw files byte-identical; agent/RNG/counter/observed/manifest state and exact request transcript equal | `test_concurrency_one_and_n_are_deterministically_equivalent` | PASS at frozen `34c6b80...` |
+| Deterministic result ordering | Reverse worker completion and reversed internal agent-list fixtures | Request/result identity remains mapped; raw logs, lifecycle observation, progress, delivery receiver IDs, state, and movement commit in agent-ID order | `test_reverse_completion_commits_canonical_order`; `test_agent_list_order_is_not_semantic` | PASS at frozen `34c6b80...` |
+| Transport-failure phase atomicity | Phase 1/3 blocked multi-request failures and multiple-error fixtures | All requests and telemetry settle; no primary log/state partial commit; deterministic minimum failing agent; executor threads release | Gate 2 targeted suite at `4f893b3...` | PASS at frozen `34c6b80...` |
+| Unexpected-worker-failure handling | Mixed transport/unexpected and multiple-unexpected fixtures | Unexpected error wins over transport, original type is re-raised, minimum unexpected agent fixes context, no partial commit or thread leak | Gate 2 targeted suite at `4f893b3...` | PASS at frozen `34c6b80...` |
+| Effective concurrency provenance | Omitted/explicit/invalid settings, caller-ownership, persisted snapshot, and config-hash fixtures | Effective positive integer is owned and persisted; invalid types/values rejected; different concurrency changes config hash | Gate 2 targeted suite at `4f893b3...` | PASS at frozen `34c6b80...` |
 
 - Gate 1 status: `PASS / FROZEN`.
 - Gate 1 frozen commit:
@@ -370,7 +370,10 @@ replacement for the still-unfilled multi-run batch manifest.
   4.952 s unittest time (5.133 s wall), `compileall` PASS, and
   `git diff --check` PASS. The full report is retained at
   `docs/reviews/gate1_independent_qa_20260816.md`.
-- Gate 2 implementation candidate: `PASS`.
+- Gate 2 status: `PASS / FROZEN`.
+- Gate 2 frozen commit:
+  `34c6b802958781b9a8d25420742e092a8a0bee3c`.
+- Gate 2 freeze tag: `gate2-frozen-20260816`.
 - Gate 2 implementation commit:
   `4f893b3926db37e508b49dadbf47f1372bec3ed6`.
 - Gate 2 specification: `docs/PHASE_PARALLELISM_SPEC.md`,
@@ -388,16 +391,22 @@ replacement for the still-unfilled multi-run batch manifest.
 - Gate 2 Metric v2 specification SHA-256:
   `226582354cd777663f5dda0944c66630ba2d7ee30a4cd9bf1ba3b847e895108d`
   (unchanged).
-- Gate 2 independent checker: `PENDING`.
-- Gate 2 freeze: `NOT DONE`; no freeze SHA or tag is recorded here.
+- Gate 2 independent checker: `PASS`; full suite 136/136 PASS in 7.978 s
+  unittest time (8.614213 s wall), targeted Gate 2 suite 19/19 PASS in
+  0.419 s unittest time (0.673850 s wall), `compileall` PASS, and
+  `git diff --check` PASS. Independent probes also passed for strict-validator
+  compatibility, worker purity, phase barriers, deterministic failure
+  selection, counter taxonomy, thread release, and scripted concurrency 1/N
+  equivalence. No Critical, High, Medium, or Low findings were reported.
+- Gate 2 independent QA report:
+  `docs/reviews/gate2_independent_qa_20260816.md`.
 - Gate 2 verification used no GPU, real LLM, Ollama/vLLM service, external
   network request, or research run.
 - Production candidate registry: `NOT YET FROZEN`.
 - Readiness verdict (`NOT READY` until every required gate has evidence):
-  `NOT READY`. Gate 1 is frozen, but the production registry, experimental
-  conditions, pilot seeds, communication intervention, Gate 2 independent
-  check, backend contract/smoke, matrix runner, and run-start approval remain
-  outstanding.
+  `NOT READY`. Gates 1 and 2 are frozen, but the production registry, experimental
+  conditions, pilot seeds, communication intervention, backend contract/smoke,
+  matrix runner, and run-start approval remain outstanding.
 - Pilot authorization: `NO`.
 - Approved run-start window: `NO`; explicit approval remains outstanding.
 
