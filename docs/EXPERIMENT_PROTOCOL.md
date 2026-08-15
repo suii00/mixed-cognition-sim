@@ -162,14 +162,26 @@ The metric specification must preserve these mandatory invariants:
 - Later data may not select vocabulary or thresholds used to classify earlier events.
 - `reasoning` is model-generated explanation, not verified internal reasoning truth.
 
-Gate 1 implementation-candidate evidence (not independently checked or frozen):
+Gate 1 corrected implementation-candidate evidence (not frozen):
 
 - Metric version: `metric-v2.0.0`
 - Normative specification: `docs/METRIC_V2_SPEC.md`
 - Specification SHA-256:
-  `972a225f5b1ef01fd1e17ae2748f4b4008d392d6513f8339879ccf863ba2b27a`
+  `226582354cd777663f5dda0944c66630ba2d7ee30a4cd9bf1ba3b847e895108d`
 - Implementation commit:
-  `d7cd66f89a57f98968ce231146f0db919c802b7e`
+  `76be8729a5d3c805bfddaba7a590b80047c6e1b1`
+- Independent checker result for the superseded candidate
+  `b7dcf1b877bda3ae83be2d2331719a60cb41432e`: `FAIL`. Metric semantics,
+  provenance, registry controls, deterministic output, and normal collision
+  handling passed, but interrupted sequential publication could expose a
+  completed-marked partial final leaf and block retry.
+- Correction scope: derived-result publication lifecycle only. The corrected
+  candidate uses a process-death-safe per-run file lock, private staging,
+  file `fsync`, manifest revalidation, and atomic publication. Independent
+  recheck of the corrected candidate is pending.
+- Gate 1 independent checker: `FAIL` (latest completed check was against the
+  superseded candidate above).
+- Gate 1 freeze: `NOT DONE`.
 - Candidate registry schema: `candidate-registry-v1.0.0`
 - Derived schema: `metric-derived-v1.0.0`
 - Normalization: `nfkc-casefold-token-sequence-v1`
@@ -199,7 +211,7 @@ Gate 1 implementation-candidate evidence (not independently checked or frozen):
 - Future-information regression-test reference:
   `tests/test_metric_v2.py::MetricV2Tests::test_unregistered_future_text_does_not_change_registered_events`
   and unsafe discovery-provenance registry fixtures at implementation commit
-  `d7cd66f89a57f98968ce231146f0db919c802b7e`.
+  `76be8729a5d3c805bfddaba7a590b80047c6e1b1`.
 - Behavioral association is deferred. No causal or behavioral claim is
   produced by `metric-v2.0.0`.
 
@@ -227,8 +239,12 @@ Gate 1 implementation-candidate evidence (not independently checked or frozen):
 ## 11. Derived outputs and traceability
 
 - Fresh, versioned derived-output path and no-overwrite rule:
-  `derived/<metric_version>/<run_id>/`; the final leaf is exclusively created
-  with `exist_ok=False`; collision fails without suffix, append, reuse, or
+  `derived/<metric_version>/<run_id>/`; a non-blocking per-run OS file lock
+  serializes publishers. The owner writes a unique
+  `derived/<metric_version>/.staging/<run_id>-<temporary-id>/` leaf on the same
+  filesystem, flushes and `fsync`s all five files, verifies the staged file set
+  and manifest, then atomically renames it to the final leaf. Existing or busy
+  publication is a collision without suffix, append, reuse, replacement, or
   overwrite; a derived root resolving inside the raw run is rejected.
 - Derived artifact list/schema: `metric-derived-v1.0.0` with
   `analysis_meta.json`, `events.jsonl`, `receiver_expression_status.jsonl`,
@@ -244,9 +260,11 @@ Gate 1 implementation-candidate evidence (not independently checked or frozen):
 - Batch manifest including completed, null, negative, failed, and aborted runs: `<UNFILLED>`
 
 Raw runs are immutable inputs. Input validation and all derived bytes are built
-before the final leaf claim. `derived_manifest.json` hashes the other required
-derived files; it is not a replacement for the still-unfilled multi-run batch
-manifest.
+before publication. A final leaf exists only after all required files and their
+manifest have been verified. Residual `.staging` leaves are unpublished,
+ineligible, ignored by retry, and not automatically removed by analysis.
+`derived_manifest.json` hashes the other required derived files; it is not a
+replacement for the still-unfilled multi-run batch manifest.
 
 ## 12. Pre-run readiness gates
 
@@ -272,24 +290,29 @@ manifest.
 | Run collision/no-overwrite | Sequential repeat and same-ID process-race fixtures | Repeat exits nonzero before LLM with all existing hashes unchanged; exactly one process wins the race | `tests/test_run_lifecycle.py`; verified at `86fad23...` | `<checker>` |
 | Run lifecycle/abort | completed/aborted/failed lifecycle fixtures and atomic-finalize fixtures | Terminal state is explicit and failed/aborted runs cannot silently appear completed | `tests/test_run_lifecycle.py`; `tests/test_validate_run.py`; verified at `86fad23...` | `<checker>` |
 | Same-instance one-shot execution | completed/aborted/failed rerun fixtures and concurrent-thread ownership fixture | Repeats fail before LLM with files/state/RNG/lifecycle unchanged; exactly one concurrent `run()` owns execution | `tests/test_run_lifecycle.py`; verified at `86fad23bc1cddf624550c044348566dc5c212bc7`; 78/78 PASS on Windows and Linux | `<checker>` |
-| Untrusted model-output non-execution | Shell/Python/URL-like message fixture | Text is tokenized only; no command, code, file creation, or URL fetch | `test_untrusted_message_is_only_text_and_executes_nothing`; 30/30 targeted PASS at implementation commit `d7cd66f...` | `<pending independent checker>` |
-| Additive/backward compatibility | Full unit suite plus protected-path diffs | Existing MVP remains unchanged and all existing tests pass | 108/108 PASS; `engine`, `tools/vocab_metrics.py`, and `output_mvp_demo` diffs empty; prompt SHA unchanged | `<pending independent checker>` |
-| Exposure differs from reuse | Delivery-only, same-step, prior-use, multiple-exposure fixtures | Delivery-only is eligible non-reuse; same/prior use excluded; later receiver Phase 1 self-use yields at most one reuse | `tests/test_metric_v2.py`; 30/30 targeted PASS | `<pending independent checker>` |
-| Future-information exclusion | Fixed-registry future-text and unsafe discovery-provenance fixtures | Unregistered later text cannot become a candidate or change registered events/status; unsafe registry rejected | `test_unregistered_future_text_does_not_change_registered_events`; registry validation fixtures | `<pending independent checker>` |
-| Derived-output collision/provenance | Sequential collision, spawn-process Barrier race, raw-line hash, and raw-directory hash fixtures | Exactly one process owns a fresh leaf; repeats collide; raw/derived files remain immutable; references match source bytes | `tests/test_metric_v2.py`; process race one success/one collision; raw before/after hashes equal | `<pending independent checker>` |
-| Fixed candidate registry validation | Registry schema/hash and invalid-registry fixtures | Expected SHA required; duplicates, empty tokens, exclusion conflicts, wrong version, unknown top-level fields, and unsafe discovery flags rejected before leaf claim | Registry validation tests in `tests/test_metric_v2.py` | `<pending independent checker>` |
-| Deterministic derived serialization | Two-derived-root byte equality and manifest fixtures | All five required files deterministic; manifest counts and hashes match exact bytes | `test_different_derived_roots_are_byte_identical`; `test_analysis_metadata_and_manifest_are_complete` | `<pending independent checker>` |
+| Untrusted model-output non-execution | Shell/Python/URL-like message fixture | Text is tokenized only; no command, code, file creation, or URL fetch | `test_untrusted_message_is_only_text_and_executes_nothing`; 39/39 targeted PASS at corrected implementation commit `76be872...` | PASS at audited `b7dcf1b...`; corrected candidate recheck pending |
+| Additive/backward compatibility | Full unit suite plus protected-path diffs | Existing MVP remains unchanged and all existing tests pass | 117/117 PASS; `engine`, `tools/vocab_metrics.py`, and `output_mvp_demo` diffs empty; prompt SHA unchanged | PASS at audited `b7dcf1b...`; corrected candidate recheck pending |
+| Exposure differs from reuse | Delivery-only, same-step, prior-use, multiple-exposure fixtures | Delivery-only is eligible non-reuse; same/prior use excluded; later receiver Phase 1 self-use yields at most one reuse | `tests/test_metric_v2.py`; 39/39 targeted PASS | PASS at audited `b7dcf1b...`; corrected candidate recheck pending |
+| Future-information exclusion | Fixed-registry future-text and unsafe discovery-provenance fixtures | Unregistered later text cannot become a candidate or change registered events/status; unsafe registry rejected | `test_unregistered_future_text_does_not_change_registered_events`; registry validation fixtures | PASS at audited `b7dcf1b...`; corrected candidate recheck pending |
+| Derived-output collision/provenance | Sequential collision, spawn-process Barrier race, raw-line hash, and raw-directory hash fixtures | Exactly one process owns a fresh result; busy/existing publications collide; raw/final files remain immutable; references match source bytes | `tests/test_metric_v2.py`; process race one success/one collision; raw before/after hashes equal | Normal path PASS at audited `b7dcf1b...`; corrected candidate recheck pending |
+| Interrupted derived publication | Failure after each of four data writes, during manifest write, after manifest verification, and abrupt spawned-child termination | Final leaf absent until atomic publish; residual staging is ineligible and does not block retry; OS lock releases on process death; retry yields five manifest-valid files | Seven interruption fixtures in `tests/test_metric_v2.py`; all raw hashes unchanged; 39/39 targeted PASS | FAIL at audited `b7dcf1b...`; corrected candidate recheck pending |
+| Fixed candidate registry validation | Registry schema/hash and invalid-registry fixtures | Expected SHA required; duplicates, empty tokens, exclusion conflicts, wrong version, unknown top-level fields, and unsafe discovery flags rejected before publication | Registry validation tests in `tests/test_metric_v2.py` | PASS at audited `b7dcf1b...`; corrected candidate recheck pending |
+| Deterministic derived serialization | Two-derived-root byte equality and manifest fixtures | All five required files deterministic; manifest counts and hashes match exact bytes | `test_different_derived_roots_are_byte_identical`; `test_analysis_metadata_and_manifest_are_complete` | PASS at audited `b7dcf1b...`; corrected candidate recheck pending |
 
-- Gate 1 implementation candidate: completed at
-  `d7cd66f89a57f98968ce231146f0db919c802b7e`; targeted tests 30/30 PASS
-  in 2.876 s and full suite 108/108 PASS in 5.208 s on the Windows CPU
-  development host; `compileall` and `git diff --check` PASS. This is pending
-  independent checking and is not a freeze record.
+- Gate 1 corrected implementation candidate: completed at
+  `76be8729a5d3c805bfddaba7a590b80047c6e1b1`; targeted tests 39/39 PASS
+  in 6.341 s and full suite 117/117 PASS in 7.296 s on the Windows CPU
+  development host; `compileall` and `git diff --check` PASS. The corrected
+  candidate has not yet passed independent rechecking and is not a freeze
+  record.
+- Gate 1 independent checker: `FAIL`.
+- Gate 1 freeze: `NOT DONE`.
 - Readiness verdict (`NOT READY` until every required gate has evidence):
-  `NOT READY`. Gate 1 implementation candidate completed, but production
-  registry, experimental conditions, pilot seeds, communication intervention,
-  parallel transport/backend smoke, matrix runner, and run-start approval
-  remain outstanding.
+  `NOT READY`. Gate 1 corrected implementation candidate awaits independent
+  recheck; production registry, experimental conditions, pilot seeds,
+  communication intervention, parallel transport/backend smoke, matrix runner,
+  and run-start approval also remain outstanding.
+- Pilot authorization: `NO`.
 - Approved run-start window: `NO`; explicit approval remains outstanding.
 
 ## 13. Amendments and deviations
