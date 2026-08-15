@@ -209,11 +209,28 @@ The metric specification must preserve these mandatory invariants:
 
 ## 12. Pre-run readiness gates
 
+### Gate 0 frozen baseline
+
+- Status: `PASS / FROZEN`
+- Frozen commit SHA: `86fad23bc1cddf624550c044348566dc5c212bc7`
+- Branch at freeze: `fix/gate0-one-shot`
+- Prompt SHA-256: `f414ab30a963636d80239644c2d3770672c77d5b8bdde027de2eb15a0d08bc3d`
+- Verification:
+  - Windows development host: 78/78 unit tests PASS
+  - Linux `gpu-sv-010`: 78/78 unit tests PASS
+  - `python3 -m compileall -q engine tests tools main.py`: PASS
+  - `git diff --check`: PASS
+  - verification worktree: clean
+- GPU/model execution during verification: none
+- Research runs performed at this gate: none
+- Reopen rule: Gate 0 is reopened only if a concrete run-integrity regression is demonstrated.
+
 | Gate | Required command/test artifact | Required result | Actual evidence | Checker |
 |---|---|---|---|---|
-| Phase barriers | `<UNFILLED>` | `<UNFILLED>` | `<UNFILLED>` | `<UNFILLED>` |
-| Communication boundary | `<UNFILLED>` | `<UNFILLED>` | `<UNFILLED>` | `<UNFILLED>` |
-| Run collision/no-overwrite | Sequential repeat and same-ID process-race fixtures | Repeat exits nonzero before LLM with all existing hashes unchanged; exactly one process wins the race | `<UNFILLED>` | `<UNFILLED>` |
+| Phase barriers | Phase 3 shared-snapshot, transport-failure, parse-failure, iteration-order fixtures | All Phase 3 decisions precede any Phase 4 movement; transport abort applies no pending movement | `tests/test_run_lifecycle.py`; verified at `86fad23...`; 78/78 PASS on Windows and Linux | `<checker>` |
+| Run collision/no-overwrite | Sequential repeat and same-ID process-race fixtures | Repeat exits nonzero before LLM with all existing hashes unchanged; exactly one process wins the race | `tests/test_run_lifecycle.py`; verified at `86fad23...` | `<checker>` |
+| Run lifecycle/abort | completed/aborted/failed lifecycle fixtures and atomic-finalize fixtures | Terminal state is explicit and failed/aborted runs cannot silently appear completed | `tests/test_run_lifecycle.py`; `tests/test_validate_run.py`; verified at `86fad23...` | `<checker>` |
+| Same-instance one-shot execution | completed/aborted/failed rerun fixtures and concurrent-thread ownership fixture | Repeats fail before LLM with files/state/RNG/lifecycle unchanged; exactly one concurrent `run()` owns execution | `tests/test_run_lifecycle.py`; verified at `86fad23bc1cddf624550c044348566dc5c212bc7`; 78/78 PASS on Windows and Linux | `<checker>` |
 | Run lifecycle/abort | `<UNFILLED>` | `<UNFILLED>` | `<UNFILLED>` | `<UNFILLED>` |
 | Untrusted model-output non-execution | `<UNFILLED>` | `<UNFILLED>` | `<UNFILLED>` | `<UNFILLED>` |
 | Additive/backward compatibility | `<UNFILLED>` | `<UNFILLED>` | `<UNFILLED>` | `<UNFILLED>` |
