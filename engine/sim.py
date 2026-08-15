@@ -145,6 +145,10 @@ class Simulation:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
     def run(self) -> None:
+        # Claim outside the run's failure handler. A rejected concurrent or
+        # repeated call is not an execution failure and must not mutate the
+        # owning call's lifecycle metadata.
+        self.run_lifecycle.claim_execution()
         try:
             print(f"=== Simulation '{self.run_name}' ({self.run_id}) starting ===")
             print(f"  Duration: {self.duration} steps")

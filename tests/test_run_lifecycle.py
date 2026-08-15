@@ -1,8 +1,10 @@
+import copy
 import hashlib
 import json
 import multiprocessing
 import re
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -89,6 +91,34 @@ def directory_hashes(output_dir: Path) -> dict:
 def read_jsonl(path: Path) -> list[dict]:
     with path.open("r", encoding="utf-8") as handle:
         return [json.loads(line) for line in handle if line.strip()]
+
+
+def simulation_state(simulation: Simulation) -> dict:
+    """Snapshot mutable in-memory state relevant to one-shot execution."""
+    return copy.deepcopy({
+        "config": simulation.config,
+        "rng_state": simulation.rng.getstate(),
+        "agents": [
+            {
+                "agent_id": agent.agent_id,
+                "position": agent.position,
+                "memories": agent.memories,
+                "received_messages": agent.received_messages,
+            }
+            for agent in simulation.agents
+        ],
+        "parse_error_count": simulation.parse_error_count,
+        "total_llm_calls": simulation.total_llm_calls,
+        "lifecycle_meta": simulation.run_lifecycle.meta,
+        "lifecycle_context": (
+            simulation.run_lifecycle.current_step,
+            simulation.run_lifecycle.current_phase,
+            simulation.run_lifecycle.current_agent_id,
+        ),
+        "observed_agent_ids": simulation.run_lifecycle._observed_agent_ids,
+        "lifecycle_terminal": simulation.run_lifecycle._terminal,
+        "execution_claimed": simulation.run_lifecycle._execution_claimed,
+    })
 
 
 class ScriptedLLM:
@@ -234,6 +264,25 @@ class RunLifecycleTests(unittest.TestCase):
             agent.position = fixed_positions[agent.agent_id]
         return simulation
 
+    def assert_rerun_rejected_without_mutation(
+        self,
+        simulation: Simulation,
+    ) -> None:
+        output_dir = Path(simulation.output_dir)
+        before_hashes = directory_hashes(output_dir)
+        before_state = simulation_state(simulation)
+
+        with mock.patch("engine.sim.call_ollama") as llm_mock:
+            with self.assertRaisesRegex(
+                RunLifecycleError,
+                "execution has already been claimed",
+            ):
+                simulation.run()
+
+        llm_mock.assert_not_called()
+        self.assertEqual(directory_hashes(output_dir), before_hashes)
+        self.assertEqual(simulation_state(simulation), before_state)
+
     def test_new_run_is_created_and_completed(self):
         with mock.patch("engine.sim.call_ollama", side_effect=successful_llm):
             simulation = self.new_simulation("new-completed-run")
@@ -255,6 +304,117 @@ class RunLifecycleTests(unittest.TestCase):
         self.assertEqual(meta["completed_steps"], 1)
         self.assertEqual(meta["expected_agents"], 1)
         self.assertEqual(meta["observed_agents"], 1)
+
+    def test_completed_instance_rejects_rerun_without_mutation(self):
+        simulation = self.new_simulation("completed-one-shot-run")
+        initial_position = simulation.agents[0].position
+        actions = {
+            0: {
+                "action": "move",
+                "direction": "right",
+                "memory": "persisted-memory",
+                "reasoning": "",
+            },
+        }
+        with mock.patch(
+            "engine.sim.call_ollama",
+            side_effect=ScriptedLLM(actions),
+        ):
+            simulation.run()
+
+        self.assertEqual(
+            simulation.agents[0].position,
+            simulation.world.clamp(initial_position[0] + 1, initial_position[1]),
+        )
+        self.assertEqual(list(simulation.agents[0].memories), ["persisted-memory"])
+        self.assert_rerun_rejected_without_mutation(simulation)
+
+        from tools.validate_run import validate_run
+
+        report = validate_run(Path(simulation.output_dir), strict=True)
+        self.assertTrue(report.valid, report.errors)
+
+    def test_aborted_instance_rejects_rerun_without_mutation(self):
+        simulation = self.new_simulation("aborted-one-shot-run")
+        with mock.patch(
+            "engine.sim.call_ollama",
+            side_effect=LLMTransportError("synthetic transport failure"),
+        ):
+            with self.assertRaises(SimulationAbortedError):
+                simulation.run()
+
+        self.assertEqual(
+            load_meta(Path(simulation.output_dir))["status"],
+            "aborted",
+        )
+        self.assert_rerun_rejected_without_mutation(simulation)
+
+    def test_failed_instance_rejects_rerun_without_mutation(self):
+        simulation = self.new_simulation("failed-one-shot-run")
+        with mock.patch(
+            "engine.sim.call_ollama",
+            side_effect=RuntimeError("synthetic failure"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "synthetic failure"):
+                simulation.run()
+
+        self.assertEqual(
+            load_meta(Path(simulation.output_dir))["status"],
+            "failed",
+        )
+        self.assert_rerun_rejected_without_mutation(simulation)
+
+    def test_concurrent_run_calls_have_exactly_one_execution_owner(self):
+        simulation = self.new_simulation("concurrent-one-shot-run")
+        owner_entered_llm = threading.Event()
+        release_owner = threading.Event()
+        owner_errors = []
+
+        def blocking_llm(**kwargs):
+            owner_entered_llm.set()
+            if not release_owner.wait(timeout=5):
+                raise TimeoutError("test did not release execution owner")
+            return successful_llm(**kwargs)
+
+        def run_owner():
+            try:
+                simulation.run()
+            except BaseException as error:
+                owner_errors.append(error)
+
+        owner_thread = threading.Thread(target=run_owner)
+        with mock.patch(
+            "engine.sim.call_ollama",
+            side_effect=blocking_llm,
+        ) as llm_mock:
+            owner_thread.start()
+            try:
+                self.assertTrue(owner_entered_llm.wait(timeout=5))
+                before_hashes = directory_hashes(Path(simulation.output_dir))
+                before_state = simulation_state(simulation)
+
+                with self.assertRaisesRegex(
+                    RunLifecycleError,
+                    "execution has already been claimed",
+                ):
+                    simulation.run()
+
+                self.assertEqual(
+                    directory_hashes(Path(simulation.output_dir)),
+                    before_hashes,
+                )
+                self.assertEqual(simulation_state(simulation), before_state)
+            finally:
+                release_owner.set()
+                owner_thread.join(timeout=5)
+
+        self.assertFalse(owner_thread.is_alive())
+        self.assertFalse(owner_errors, owner_errors)
+        self.assertEqual(llm_mock.call_count, 2)
+        self.assertEqual(
+            load_meta(Path(simulation.output_dir))["status"],
+            "completed",
+        )
 
     def test_missing_config_run_id_generates_and_persists_one(self):
         config = make_config()

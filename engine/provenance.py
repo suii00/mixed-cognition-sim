@@ -12,6 +12,7 @@ import re
 import socket
 import subprocess
 import sys
+import threading
 import unicodedata
 import uuid
 from datetime import datetime, timezone
@@ -655,6 +656,8 @@ class RunLifecycle:
         self.current_agent_id: Optional[int] = None
         self._observed_agent_ids: set[int] = set()
         self._terminal = False
+        self._execution_claimed = False
+        self._execution_claim_lock = threading.Lock()
 
     @classmethod
     def create(
@@ -924,6 +927,19 @@ class RunLifecycle:
             raise RunLifecycleError("run ID changed during lifecycle")
         self._sync_compatibility_fields()
         atomic_write_json(self.output_dir / "run_meta.json", self.meta)
+
+    def claim_execution(self) -> None:
+        """Atomically make this lifecycle a one-shot execution owner."""
+        with self._execution_claim_lock:
+            if self._execution_claimed:
+                raise RunLifecycleError(
+                    "simulation execution has already been claimed"
+                )
+            if self._terminal or self.meta.get("status") != "running":
+                raise RunLifecycleError(
+                    "run lifecycle is not in a runnable state"
+                )
+            self._execution_claimed = True
 
     def set_context(
         self,

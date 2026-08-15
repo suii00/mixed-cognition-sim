@@ -147,6 +147,9 @@ Mandatory inter-run immutability invariants:
 - A rejected repeat attempt must leave every pre-existing run file byte-identical.
 - Concurrent claims for the same run ID must produce exactly one owner and one
   or more collision failures.
+- A `Simulation` instance may claim execution ownership only once. Concurrent
+  non-owner calls and repeats after completed, aborted, or failed outcomes must
+  fail before any LLM call without changing files or mutable simulation state.
 - Only the owning run may atomically update its documented lifecycle metadata
   (`running` to `completed`, `aborted`, or `failed`).
 
