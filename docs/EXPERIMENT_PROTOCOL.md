@@ -113,13 +113,59 @@ Evidence class must be one of: `direct observation`, `mechanical derivation`,
 
 ## 6. Phase and communication semantics gate
 
-- Evidence that all Phase 1 decisions finish before any delivery: `<UNFILLED>`
-- Evidence that all Phase 3 decisions finish before any movement: `<UNFILLED>`
-- Snapshot used to construct each phase's decisions: `<UNFILLED>`
-- Communication boundary definition and regression test: `<UNFILLED>`
-- Deterministic result/log ordering rule: `<UNFILLED>`
-- Required protocol-version consequence of phase, communication, prompt, schema,
-  or metric changes: `<UNFILLED>`
+- Phase-parallelism specification: `docs/PHASE_PARALLELISM_SPEC.md`,
+  `phase-parallelism-v1.0.0`, SHA-256
+  `77c187277544c116de75273e62d7e13412ad932b38bf9a8e2d5c831347fb105a`.
+- Concurrency configuration: `llm_defaults.max_concurrency` is a positive
+  integer, defaults effectively to `1`, and is persisted in the owned config
+  snapshot and config hash. Concurrency 1 and N use the same bounded threaded
+  batch executor.
+- Phase 1 snapshot: before dispatch, the coordinator copies every position,
+  recent memory/message context, places, applicable place, and occupancy and
+  constructs every prompt/request from that common step-start snapshot.
+- Evidence that all Phase 1 decisions finish before any delivery: all requests
+  are submitted and settled before canonical result commit; Event-blocked
+  delivery-barrier and all-prompts-before-dispatch fixtures in
+  `tests/test_phase_parallelism.py` observe no delivery, message log, or Phase 3
+  request while a Phase 1 worker remains blocked.
+- Phase 2 delivery boundary: sequential sender/receiver ID order using the
+  Phase 1 step-start position snapshot and the unchanged communication/place
+  rule; delivery starts only after all Phase 1 results commit.
+- Phase 3 snapshot: only after all deliveries, the coordinator copies every
+  position, recent memory/message context, place, and occupancy and constructs
+  every Phase 3 prompt/request before dispatch.
+- Evidence that all Phase 3 decisions finish before memory or movement:
+  all requests settle and terminal errors are checked before any Phase 3 state
+  or primary-log commit; Event-blocked snapshot/movement fixtures observe
+  pre-commit memory and positions while another worker has already completed.
+- Phase 4 movement boundary: sequential movement in ascending agent ID using
+  only fully committed Phase 3 action/direction results and the unchanged clamp
+  rule.
+- Deterministic result/log ordering: completion order and internal agent-list
+  order are non-semantic; prompt construction, request submission, result/log
+  commit, delivery, progress output, and movement use ascending agent ID.
+- Coordinator-only mutation: workers receive immutable value requests and
+  worker-local telemetry. Lifecycle/counter/log/agent/movement instrumentation
+  confirms all shared mutation occurs on the calling coordinator thread.
+- Failure semantics: every submitted request settles. Parse failure remains a
+  non-terminal logged fallback; a transport failure aborts without partial
+  phase commit; an unexpected worker exception takes priority, remains its
+  original type, and fails without partial phase commit. The lowest agent ID in
+  the selected error class fixes lifecycle context.
+- Deterministic equivalence boundary: for the three-agent, two-step scripted
+  fixture, concurrency 1 and 3 have byte-identical scientific raw JSONL plus
+  equal agent/RNG/counter/manifest/request-transcript state. No equivalent claim
+  is made for actual LLM output.
+- Ollama reference transport: unchanged `engine.sim.call_ollama`, resolved at
+  invocation and supplied only worker-local telemetry. Real network/model calls
+  were prohibited in implementation tests.
+- vLLM transport/API contract and backend smoke: deferred; no vLLM conformance
+  or runtime claim is recorded by Gate 2 implementation evidence.
+- Required version consequence: changes to snapshots, phase commit/barriers,
+  error selection, ordering, telemetry, concurrency interpretation,
+  worker/coordinator ownership, or backend contract require a
+  phase-parallelism spec version update and regression evidence. Existing
+  protocol, prompt, raw-schema, and metric version rules remain applicable.
 
 ## 7. Raw data integrity and run eligibility
 
@@ -304,6 +350,14 @@ replacement for the still-unfilled multi-run batch manifest.
 | Interrupted derived publication | Failure after each of four data writes, during manifest write, after manifest verification, and abrupt spawned-child termination | Final leaf absent until atomic publish; residual staging is ineligible and does not block retry; OS lock releases on process death; retry yields five manifest-valid files | Seven interruption fixtures in `tests/test_metric_v2.py`; all raw hashes unchanged; 39/39 targeted PASS | PASS at frozen `932f531...` |
 | Fixed candidate registry validation | Registry schema/hash and invalid-registry fixtures | Expected SHA required; duplicates, empty tokens, exclusion conflicts, wrong version, unknown top-level fields, and unsafe discovery flags rejected before publication | Registry validation tests in `tests/test_metric_v2.py` | PASS at frozen `932f531...` |
 | Deterministic derived serialization | Two-derived-root byte equality and manifest fixtures | All five required files deterministic; manifest counts and hashes match exact bytes | `test_different_derived_roots_are_byte_identical`; `test_analysis_metadata_and_manifest_are_complete` | PASS at frozen `932f531...` |
+| Worker purity / coordinator-only mutation | Worker-local telemetry blocking fixture and shared-mutation instrumentation | Workers touch no lifecycle, simulation counter, log, agent state, or movement path; coordinator reflects settled facts | `tests/test_phase_parallelism.py`; 19/19 targeted PASS at implementation commit `4f893b3...` | `<pending independent checker>` |
+| Phase 1 batch barrier | All-prompts-before-dispatch, blocked-delivery, reverse-completion, and terminal-failure fixtures | Common step-start snapshot; every request settles before canonical Phase 1 commit or any delivery; terminal failure publishes no Phase 1 result | `tests/test_phase_parallelism.py`; deterministic CPU scripted transports | `<pending independent checker>` |
+| Phase 3 batch barrier | Post-delivery snapshot, blocked-memory/movement, parse, and terminal-failure fixtures | Common post-delivery snapshot; every result settles before memory/log commit; all Phase 3 commits precede movement; terminal failure publishes no Phase 3 result | `tests/test_phase_parallelism.py`; existing lifecycle barrier fixtures retained | `<pending independent checker>` |
+| Concurrency 1/N scripted equivalence | Three-agent, two-step deterministic scripted scenario at concurrency 1 and 3 | Four scientific raw files byte-identical; agent/RNG/counter/observed/manifest state and exact request transcript equal | `test_concurrency_one_and_n_are_deterministically_equivalent` | `<pending independent checker>` |
+| Deterministic result ordering | Reverse worker completion and reversed internal agent-list fixtures | Request/result identity remains mapped; raw logs, lifecycle observation, progress, delivery receiver IDs, state, and movement commit in agent-ID order | `test_reverse_completion_commits_canonical_order`; `test_agent_list_order_is_not_semantic` | `<pending independent checker>` |
+| Transport-failure phase atomicity | Phase 1/3 blocked multi-request failures and multiple-error fixtures | All requests and telemetry settle; no primary log/state partial commit; deterministic minimum failing agent; executor threads release | Gate 2 targeted suite at `4f893b3...` | `<pending independent checker>` |
+| Unexpected-worker-failure handling | Mixed transport/unexpected and multiple-unexpected fixtures | Unexpected error wins over transport, original type is re-raised, minimum unexpected agent fixes context, no partial commit or thread leak | Gate 2 targeted suite at `4f893b3...` | `<pending independent checker>` |
+| Effective concurrency provenance | Omitted/explicit/invalid settings, caller-ownership, persisted snapshot, and config-hash fixtures | Effective positive integer is owned and persisted; invalid types/values rejected; different concurrency changes config hash | Gate 2 targeted suite at `4f893b3...` | `<pending independent checker>` |
 
 - Gate 1 status: `PASS / FROZEN`.
 - Gate 1 frozen commit:
@@ -316,11 +370,34 @@ replacement for the still-unfilled multi-run batch manifest.
   4.952 s unittest time (5.133 s wall), `compileall` PASS, and
   `git diff --check` PASS. The full report is retained at
   `docs/reviews/gate1_independent_qa_20260816.md`.
+- Gate 2 implementation candidate: `PASS`.
+- Gate 2 implementation commit:
+  `4f893b3926db37e508b49dadbf47f1372bec3ed6`.
+- Gate 2 specification: `docs/PHASE_PARALLELISM_SPEC.md`,
+  `phase-parallelism-v1.0.0`, SHA-256
+  `77c187277544c116de75273e62d7e13412ad932b38bf9a8e2d5c831347fb105a`.
+- Gate 2 implementation evidence: targeted suite 19/19 PASS in 0.483 s
+  unittest time (0.725 s wall); lifecycle suite 33/33 PASS in 1.142 s
+  unittest time (1.373 s wall); provenance suite 28/28 PASS in 0.120 s
+  unittest time (0.345 s wall); full suite 136/136 PASS in 8.381 s
+  unittest time (8.691 s wall); `compileall`, `git diff --check`, and protected
+  Gate 1 path comparisons PASS.
+- Gate 2 prompt SHA-256:
+  `f414ab30a963636d80239644c2d3770672c77d5b8bdde027de2eb15a0d08bc3d`
+  (unchanged).
+- Gate 2 Metric v2 specification SHA-256:
+  `226582354cd777663f5dda0944c66630ba2d7ee30a4cd9bf1ba3b847e895108d`
+  (unchanged).
+- Gate 2 independent checker: `PENDING`.
+- Gate 2 freeze: `NOT DONE`; no freeze SHA or tag is recorded here.
+- Gate 2 verification used no GPU, real LLM, Ollama/vLLM service, external
+  network request, or research run.
+- Production candidate registry: `NOT YET FROZEN`.
 - Readiness verdict (`NOT READY` until every required gate has evidence):
   `NOT READY`. Gate 1 is frozen, but the production registry, experimental
-  conditions, pilot seeds, communication intervention, phase-preserving
-  parallel transport/backend smoke, matrix runner, and run-start approval
-  remain outstanding.
+  conditions, pilot seeds, communication intervention, Gate 2 independent
+  check, backend contract/smoke, matrix runner, and run-start approval remain
+  outstanding.
 - Pilot authorization: `NO`.
 - Approved run-start window: `NO`; explicit approval remains outstanding.
 
