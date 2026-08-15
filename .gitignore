@@ -3,5 +3,6 @@ __pycache__/
 output_*/
 !output_mvp_demo/
 renamed_run_dir/
+.claude/worktrees/
 
 *_local.md
