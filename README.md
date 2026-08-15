@@ -47,7 +47,9 @@ pip install -r requirements.txt
 python main.py --config configs/smoke_local.yaml
 ```
 
-出力は `output_<run_name>/` に書き出されます。
+出力は run ごとに一意な `output_<run_id>/` に書き出されます。`run_id` を
+config で省略した場合は自動生成されます。既に同名のディレクトリがある場合、
+既存データには触れず開始前に失敗します。
 
 ### 可視化ツール
 
@@ -63,10 +65,18 @@ simulation:
   duration: 15          # ステップ数
   half_space_size: 25   # 格子範囲 [-S, +S]
   seed: 42              # 乱数シード
-  run_name: smoke_local # 出力ディレクトリの接尾辞
+  run_name: smoke_local # 人が読むためのrun名
+  # run_id: smoke-local-001  # 任意。省略時は一意なIDを自動生成
+  # protocol_version: unversioned
+  # metric_version: unversioned
+  # failure_thresholds:     # strict validatorの許容上限（省略時は各0）
+  #   transport_failures: 0
+  #   syntax_parse_failures: 0
+  #   schema_validation_failures: 0
 
 blocs:
   - name: alpha
+    provider: ollama       # 省略時もollama。現行はollamaのみ対応
     model: "qwen2.5:3b"
     base_url: "http://localhost:11434"
     num_agents: 2
@@ -92,12 +102,30 @@ llm_defaults:
   timeout_s: 120
 ```
 
+本実験では `protocol_version` と `metric_version` を `unversioned` のままにせず、
+事前に確定した版を明示してください。
+現行Ollama clientの `base_url` は `scheme://host[:port]` だけを受け付け、
+credential、path、query、fragment、末尾slashを含む値は開始前に拒否します。
+`provider` に `ollama` 以外を指定したconfigも、実呼出しとの虚偽表記を防ぐため
+開始前に拒否します。
+
 ## ログスキーマ
 
-全ログは `output_<run_name>/` 内に出力されます:
+全ログは `output_<run_id>/` 内に出力されます:
 
 - **messages.jsonl**: `{step, sender_id, sender_bloc, sender_model, receiver_ids, message, reasoning}` — 配送が成立したメッセージのみ
 - **phase1_raw.jsonl**: `{step, agent_id, bloc, model, parsed, raw_output}` — Phase 1 の全出力（診断用）
 - **memory_reasoning.jsonl**: `{step, agent_id, bloc, model, position, action, direction, memory, reasoning}`
-- **run_meta.json**: config全文スナップショット、シード、開始/終了時刻、パース失敗率
+- **run_meta.json**: run lifecycle、redact済みconfig、source・prompt・環境情報、raw manifest
 - **parse_errors.jsonl**: `{step, agent_id, phase, raw_output}` — JSONパース失敗時の生出力
+
+完了runは、終了コードだけでなくstrict validatorでも確認します。
+
+```bash
+python tools/validate_run.py output_<run_id> --strict
+```
+
+現行ログにはevent IDがないため、validatorは自然キーで検査できる重複だけを
+判定し、全eventを横断した同一性は `UNVERIFIABLE` と明示します。
+`config_hash` は保存されたredact済みconfig snapshotを対象とし、除去したcredential値は
+hash対象にも含めません。

@@ -1,18 +1,24 @@
 import json
 import os
 import random
-import time
-from datetime import datetime, timezone
+from pathlib import Path
 from typing import Dict, List, Any, Optional, Tuple
 
 from engine.world import World
 from engine.agent import Agent
-from engine.llm_client import call_ollama, extract_json
+from engine.llm_client import LLMTransportError, call_ollama
 from engine.prompts import build_phase1_prompt, build_phase3_prompt
+from engine.provenance import RunLifecycle
+
+
+class SimulationAbortedError(RuntimeError):
+    """A controlled run abort that must produce a non-zero CLI exit."""
 
 
 class Simulation:
-    def __init__(self, config: Dict[str, Any]):
+    def __init__(self, config: Dict[str, Any],
+                 output_root: Optional[Path] = None,
+                 repo_root: Optional[Path] = None):
         self.config = config
         sim_cfg = config["simulation"]
         self.duration = sim_cfg["duration"]
@@ -32,16 +38,44 @@ class Simulation:
         self.max_tokens = llm.get("max_tokens", 1024)
         self.timeout_s = llm.get("timeout_s", 120)
 
-        self.world = World(self.half_space_size, config["places"])
-        self.rng = random.Random(self.seed)
         self.agents: List[Agent] = []
         self.parse_error_count = 0
         self.total_llm_calls = 0
 
-        self._init_agents(config["blocs"])
+        self.run_lifecycle = RunLifecycle.create(
+            config,
+            output_root=output_root,
+            repo_root=repo_root,
+        )
+        self.run_id = self.run_lifecycle.run_id
+        self.output_dir = str(self.run_lifecycle.output_dir)
 
-        self.output_dir = f"output_{self.run_name}"
-        os.makedirs(self.output_dir, exist_ok=True)
+        try:
+            self.world = World(self.half_space_size, config["places"])
+            self.rng = random.Random(self.seed)
+            self._init_agents(config["blocs"])
+        except KeyboardInterrupt as error:
+            self._best_effort_finalize(
+                "aborted", "keyboard_interrupt", type(error).__name__
+            )
+            raise
+        except BaseException as error:
+            self._best_effort_finalize(
+                "failed", "initialization_failure", type(error).__name__
+            )
+            raise
+
+    def _best_effort_finalize(
+        self,
+        status: str,
+        reason: str,
+        exception_type: Optional[str],
+    ) -> None:
+        try:
+            self.run_lifecycle.finalize_failure(status, reason, exception_type)
+        except BaseException:
+            # Preserve the original failure. The last valid running meta remains.
+            pass
 
     def _init_agents(self, blocs_cfg: List[Dict]) -> None:
         total_agents = sum(b["num_agents"] for b in blocs_cfg)
@@ -85,6 +119,7 @@ class Simulation:
 
     def _call_llm(self, agent: Agent, prompt: str) -> Tuple[Optional[Dict], str]:
         self.total_llm_calls += 1
+        self.run_lifecycle.increment("logical_llm_calls")
         try:
             parsed, raw = call_ollama(
                 prompt=prompt,
@@ -94,12 +129,14 @@ class Simulation:
                 max_tokens=self.max_tokens,
                 timeout_s=self.timeout_s,
                 llm_overrides=agent.llm_overrides,
+                telemetry=self.run_lifecycle.record_llm_telemetry,
             )
             if parsed is None:
                 self.parse_error_count += 1
+                self.run_lifecycle.increment("syntax_parse_failures")
             return parsed, raw
-        except RuntimeError as e:
-            print(f"[FATAL] LLM connection failed for agent {agent.agent_id}: {e}")
+        except LLMTransportError:
+            print(f"[FATAL] LLM transport failed for agent {agent.agent_id}")
             raise
 
     def _log_jsonl(self, filename: str, record: Dict) -> None:
@@ -108,23 +145,38 @@ class Simulation:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
     def run(self) -> None:
-        start_time = datetime.now(timezone.utc).isoformat()
-        print(f"=== Simulation '{self.run_name}' starting ===")
-        print(f"  Duration: {self.duration} steps")
-        print(f"  Agents: {len(self.agents)}")
-        print(f"  Seed: {self.seed}")
-
         try:
+            print(f"=== Simulation '{self.run_name}' ({self.run_id}) starting ===")
+            print(f"  Duration: {self.duration} steps")
+            print(f"  Agents: {len(self.agents)}")
+            print(f"  Seed: {self.seed}")
+
             for step in range(1, self.duration + 1):
+                self.run_lifecycle.set_context(step, "step_start", None)
                 print(f"\n--- Step {step}/{self.duration} ---")
                 self._run_step(step)
-        except RuntimeError as e:
-            print(f"\n[ABORT] Simulation aborted at step: {e}")
-            self._write_meta(start_time, aborted=True)
-            return
+                self.run_lifecycle.mark_step_completed(step)
+            self.run_lifecycle.set_context(None, "finalize", None)
+            self.run_lifecycle.finalize_completed()
+        except KeyboardInterrupt as error:
+            self._best_effort_finalize(
+                "aborted", "keyboard_interrupt", type(error).__name__
+            )
+            raise
+        except LLMTransportError as error:
+            self._best_effort_finalize(
+                "aborted", "transport_failure", type(error).__name__
+            )
+            raise SimulationAbortedError(
+                "simulation aborted due to a terminal LLM transport failure"
+            ) from error
+        except BaseException as error:
+            self._best_effort_finalize(
+                "failed", "unhandled_exception", type(error).__name__
+            )
+            raise
 
-        self._write_meta(start_time, aborted=False)
-        print(f"\n=== Simulation '{self.run_name}' completed ===")
+        print(f"\n=== Simulation '{self.run_name}' ({self.run_id}) completed ===")
         print(f"  Total LLM calls: {self.total_llm_calls}")
         print(f"  Parse errors: {self.parse_error_count}")
         if self.total_llm_calls > 0:
@@ -137,6 +189,7 @@ class Simulation:
         # Phase 1: message decision
         phase1_results: Dict[int, Tuple[Optional[Dict], str]] = {}
         for agent in self.agents:
+            self.run_lifecycle.set_context(step, "phase1", agent.agent_id)
             place = self.world.get_place_for(*agent.position)
             agent_count = (self.world.count_agents_in_place(place, positions)
                            if place else 0)
@@ -161,6 +214,7 @@ class Simulation:
                 "parsed": parsed,
                 "raw_output": raw,
             })
+            self.run_lifecycle.observe_agent(agent.agent_id)
 
             if parsed is None:
                 self._log_jsonl("parse_errors.jsonl", {
@@ -174,6 +228,7 @@ class Simulation:
 
         # Phase 2: message delivery
         for sender in self.agents:
+            self.run_lifecycle.set_context(step, "phase2", sender.agent_id)
             parsed, _ = phase1_results[sender.agent_id]
             if parsed is None:
                 continue
@@ -205,6 +260,7 @@ class Simulation:
 
         # Phase 3: action decision
         for agent in self.agents:
+            self.run_lifecycle.set_context(step, "phase3", agent.agent_id)
             place = self.world.get_place_for(*agent.position)
             agent_count = (self.world.count_agents_in_place(place, positions)
                            if place else 0)
@@ -251,8 +307,10 @@ class Simulation:
                 "memory": memory_text,
                 "reasoning": reasoning,
             })
+            self.run_lifecycle.observe_agent(agent.agent_id)
 
             # Phase 4: execute movement
+            self.run_lifecycle.set_context(step, "phase4", agent.agent_id)
             if action == "move" and direction:
                 x, y = agent.position
                 if direction == "up":
@@ -268,23 +326,4 @@ class Simulation:
             print(f"  Phase 3-4: Agent {agent.agent_id} ({agent.bloc}) -> "
                   f"{action} {direction} @ {agent.position}")
 
-    def _write_meta(self, start_time: str, aborted: bool) -> None:
-        end_time = datetime.now(timezone.utc).isoformat()
-        parse_rate = (self.parse_error_count / self.total_llm_calls
-                      if self.total_llm_calls > 0 else 0.0)
-
-        meta = {
-            "run_name": self.run_name,
-            "config": self.config,
-            "seed": self.seed,
-            "start_time": start_time,
-            "end_time": end_time,
-            "aborted": aborted,
-            "total_llm_calls": self.total_llm_calls,
-            "parse_errors": self.parse_error_count,
-            "parse_error_rate": parse_rate,
-        }
-
-        path = os.path.join(self.output_dir, "run_meta.json")
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(meta, f, indent=2, ensure_ascii=False)
+        self.run_lifecycle.set_context(step, "step_complete", None)

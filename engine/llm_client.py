@@ -2,7 +2,14 @@ import json
 import re
 import time
 import requests
-from typing import Dict, Optional, Tuple
+from typing import Callable, Dict, Optional, Tuple
+
+
+TelemetryCallback = Callable[[str, int], None]
+
+
+class LLMTransportError(RuntimeError):
+    """A terminal HTTP/transport failure that must abort the run."""
 
 
 def extract_json(text: str) -> Optional[Dict]:
@@ -24,9 +31,40 @@ def extract_json(text: str) -> Optional[Dict]:
     return None
 
 
+def _emit(telemetry: Optional[TelemetryCallback], event: str) -> None:
+    if telemetry is not None:
+        telemetry(event, 1)
+
+
+def _post_with_retries(url: str, payload: Dict, timeout_s: int,
+                       telemetry: Optional[TelemetryCallback]):
+    max_retries = 3
+    for attempt in range(max_retries):
+        _emit(telemetry, "http_attempt")
+        try:
+            response = requests.post(url, json=payload, timeout=timeout_s)
+            response.raise_for_status()
+            return response
+        except (requests.ConnectionError, requests.Timeout) as error:
+            _emit(telemetry, "transport_failure")
+            if attempt == max_retries - 1:
+                raise LLMTransportError(
+                    f"Ollama transport failed after {max_retries} attempts"
+                ) from error
+            time.sleep(2 ** attempt)
+        except requests.HTTPError as error:
+            _emit(telemetry, "transport_failure")
+            raise LLMTransportError("Ollama returned an HTTP error") from error
+        except requests.RequestException as error:
+            _emit(telemetry, "transport_failure")
+            raise LLMTransportError("Ollama request failed") from error
+    raise LLMTransportError("Ollama transport retry loop ended unexpectedly")
+
+
 def call_ollama(prompt: str, model: str, base_url: str,
                 temperature: float = 0.2, max_tokens: int = 1024,
-                timeout_s: int = 120, llm_overrides: Optional[Dict] = None
+                timeout_s: int = 120, llm_overrides: Optional[Dict] = None,
+                telemetry: Optional[TelemetryCallback] = None,
                 ) -> Tuple[Optional[Dict], str]:
     url = f"{base_url}/api/chat"
     payload = {
@@ -41,37 +79,20 @@ def call_ollama(prompt: str, model: str, base_url: str,
     if llm_overrides:
         payload["options"].update(llm_overrides)
 
-    max_retries = 3
-    for attempt in range(max_retries):
-        try:
-            resp = requests.post(url, json=payload, timeout=timeout_s)
-            resp.raise_for_status()
-            break
-        except (requests.ConnectionError, requests.Timeout) as e:
-            if attempt == max_retries - 1:
-                raise RuntimeError(
-                    f"Ollama connection failed after {max_retries} retries: {e}"
-                )
-            time.sleep(2 ** attempt)
-
+    resp = _post_with_retries(url, payload, timeout_s, telemetry)
     raw_text = resp.json()["message"]["content"]
     parsed = extract_json(raw_text)
     if parsed is not None:
         return parsed, raw_text
 
-    # parse retry: call once more
-    for attempt in range(max_retries):
-        try:
-            resp2 = requests.post(url, json=payload, timeout=timeout_s)
-            resp2.raise_for_status()
-            break
-        except (requests.ConnectionError, requests.Timeout) as e:
-            if attempt == max_retries - 1:
-                return None, raw_text
-            time.sleep(2 ** attempt)
+    _emit(telemetry, "syntax_parse_attempt_failure")
+    _emit(telemetry, "generation_retry")
 
+    # parse retry: call once more
+    resp2 = _post_with_retries(url, payload, timeout_s, telemetry)
     raw_text2 = resp2.json()["message"]["content"]
     parsed2 = extract_json(raw_text2)
     if parsed2 is not None:
         return parsed2, raw_text2
+    _emit(telemetry, "syntax_parse_attempt_failure")
     return None, raw_text2
