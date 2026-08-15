@@ -1,3 +1,5 @@
+import copy
+
 import yaml
 from typing import Dict, Any
 
@@ -8,15 +10,43 @@ from engine.provenance import (
 )
 
 
+DEFAULT_MAX_CONCURRENCY = 1
+
+
+def build_effective_config(config: Dict[str, Any]) -> Dict[str, Any]:
+    """Return an owned config with all execution-affecting defaults explicit."""
+    if not isinstance(config, dict):
+        raise ValueError("config must be a mapping")
+    effective = copy.deepcopy(config)
+    llm_defaults = effective.get("llm_defaults")
+    if not isinstance(llm_defaults, dict):
+        raise ValueError("llm_defaults must be a mapping")
+    max_concurrency = llm_defaults.get(
+        "max_concurrency",
+        DEFAULT_MAX_CONCURRENCY,
+    )
+    if (
+        not isinstance(max_concurrency, int)
+        or isinstance(max_concurrency, bool)
+        or max_concurrency <= 0
+    ):
+        raise ValueError("llm_defaults.max_concurrency must be a positive integer")
+    llm_defaults["max_concurrency"] = max_concurrency
+    return effective
+
+
 def load_config(path: str) -> Dict[str, Any]:
     with open(path, "r", encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
 
+    if not isinstance(cfg, dict):
+        raise ValueError("config must be a mapping")
     required_top = ["simulation", "blocs", "agents", "places", "llm_defaults"]
     for key in required_top:
         if key not in cfg:
             raise ValueError(f"Missing required config section: {key}")
 
+    cfg = build_effective_config(cfg)
     sim = cfg["simulation"]
     for key in ["duration", "half_space_size", "seed", "run_name"]:
         if key not in sim:
