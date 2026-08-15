@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
+import os
 import re
 import unicodedata
+import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, Optional, Sequence
+from typing import Any, Callable, Dict, Iterable, Iterator, Optional, Sequence
 
 from engine.provenance import collect_git_info
 from tools.validate_run import validate_run
@@ -34,6 +38,10 @@ REQUIRED_DERIVED_FILES = (
     "receiver_expression_status.jsonl",
     "summary.json",
 )
+DERIVED_MANIFEST_FILE = "derived_manifest.json"
+ALL_DERIVED_FILES = (*REQUIRED_DERIVED_FILES, DERIVED_MANIFEST_FILE)
+
+PublicationHook = Callable[[str, Path], None]
 
 
 class MetricV2Error(RuntimeError):
@@ -53,7 +61,11 @@ class RunEligibilityError(InputValidationError):
 
 
 class DerivedCollisionError(MetricV2Error):
-    """The final versioned derived leaf already exists."""
+    """The final leaf exists or another process owns its publication."""
+
+
+class DerivedPublicationError(MetricV2Error):
+    """A fully staged derived result could not be verified or published."""
 
 
 class _DuplicateJsonKey(ValueError):
@@ -923,11 +935,28 @@ def _is_within(path: Path, parent: Path) -> bool:
     return path == parent or parent in path.parents
 
 
-def claim_derived_directory(
+def _path_lexists(path: Path) -> bool:
+    return os.path.lexists(path)
+
+
+def _create_publication_directory(path: Path, label: str) -> None:
+    if _path_lexists(path) and (path.is_symlink() or not path.is_dir()):
+        raise InputValidationError(f"{label} must be a real directory")
+    try:
+        path.mkdir(exist_ok=True)
+    except OSError as error:
+        raise InputValidationError(
+            f"{label} cannot be created: {type(error).__name__}"
+        ) from error
+    if path.is_symlink() or not path.is_dir():
+        raise InputValidationError(f"{label} must be a real directory")
+
+
+def _prepare_publication_layout(
     run_dir: Path | str,
     derived_root: Path | str,
     run_id: str,
-) -> Path:
+) -> tuple[Path, Path, Path, Path]:
     raw_path = Path(run_dir).resolve(strict=True)
     root = Path(derived_root)
     resolved_root = root.resolve(strict=False)
@@ -956,18 +985,197 @@ def claim_derived_directory(
     if version_directory.is_symlink():
         raise InputValidationError("metric version directory may not be a symlink")
 
-    leaf = version_directory / run_id
+    resolved_version = version_directory.resolve(strict=True)
+    if resolved_version != root.resolve(strict=True) / METRIC_VERSION:
+        raise InputValidationError(
+            "metric version directory must remain inside the derived root"
+        )
+
+    lock_directory = version_directory / ".locks"
+    staging_directory = version_directory / ".staging"
+    _create_publication_directory(lock_directory, "publication lock directory")
+    _create_publication_directory(staging_directory, "staging directory")
+    if lock_directory.resolve(strict=True).parent != resolved_version:
+        raise InputValidationError(
+            "publication lock directory must remain inside the metric directory"
+        )
+    if staging_directory.resolve(strict=True).parent != resolved_version:
+        raise InputValidationError(
+            "staging directory must remain inside the metric directory"
+        )
+    if os.stat(staging_directory).st_dev != os.stat(version_directory).st_dev:
+        raise InputValidationError(
+            "staging and final derived outputs must use the same filesystem"
+        )
+
+    final_leaf = version_directory / run_id
+    lock_path = lock_directory / f"{run_id}.lock"
+    return version_directory, staging_directory, lock_path, final_leaf
+
+
+def _open_lock_file(lock_path: Path):
+    if _path_lexists(lock_path) and lock_path.is_symlink():
+        raise InputValidationError("publication lock file may not be a symlink")
+    flags = os.O_RDWR | os.O_CREAT
+    if hasattr(os, "O_BINARY"):
+        flags |= os.O_BINARY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
     try:
-        leaf.mkdir(exist_ok=False)
-    except FileExistsError as error:
-        raise DerivedCollisionError(
-            f"derived output already exists for run ID {run_id!r}"
-        ) from error
+        descriptor = os.open(lock_path, flags, 0o600)
     except OSError as error:
         raise InputValidationError(
-            f"derived output cannot be claimed: {type(error).__name__}"
+            f"publication lock file cannot be opened: {type(error).__name__}"
         ) from error
-    return leaf
+    return os.fdopen(descriptor, "r+b", buffering=0)
+
+
+@contextmanager
+def _publication_lock(lock_path: Path, run_id: str) -> Iterator[None]:
+    handle = _open_lock_file(lock_path)
+    locked = False
+    try:
+        handle.seek(0, os.SEEK_END)
+        if handle.tell() == 0:
+            handle.write(b"\0")
+            handle.flush()
+            os.fsync(handle.fileno())
+        handle.seek(0)
+        try:
+            if os.name == "nt":
+                import msvcrt
+
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as error:
+            if error.errno in {errno.EACCES, errno.EAGAIN, errno.EDEADLK}:
+                raise DerivedCollisionError(
+                    f"derived publication is already in progress for run ID {run_id!r}"
+                ) from error
+            raise InputValidationError(
+                f"publication lock cannot be acquired: {type(error).__name__}"
+            ) from error
+        locked = True
+        yield
+    finally:
+        if locked:
+            try:
+                handle.seek(0)
+                if os.name == "nt":
+                    import msvcrt
+
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    import fcntl
+
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            except OSError:
+                # Closing the descriptor still releases an OS-owned lock.
+                pass
+        handle.close()
+
+
+def _create_staging_leaf(staging_directory: Path, run_id: str) -> Path:
+    for _ in range(16):
+        staging_leaf = staging_directory / f"{run_id}-{uuid.uuid4().hex}"
+        try:
+            staging_leaf.mkdir(exist_ok=False)
+        except FileExistsError:
+            continue
+        except OSError as error:
+            raise DerivedPublicationError(
+                f"staging directory cannot be created: {type(error).__name__}"
+            ) from error
+        return staging_leaf
+    raise DerivedPublicationError("a unique staging directory could not be created")
+
+
+def _write_fsynced(path: Path, content: bytes) -> None:
+    with path.open("xb") as handle:
+        handle.write(content)
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
+def _write_manifest_with_checkpoint(
+    path: Path,
+    content: bytes,
+    staging_leaf: Path,
+    publication_hook: Optional[PublicationHook],
+) -> None:
+    midpoint = max(1, len(content) // 2)
+    with path.open("xb") as handle:
+        handle.write(content[:midpoint])
+        handle.flush()
+        os.fsync(handle.fileno())
+        if publication_hook is not None:
+            publication_hook("during_manifest_write", staging_leaf)
+        handle.write(content[midpoint:])
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
+def _fsync_directory(path: Path) -> None:
+    if os.name != "posix":
+        return
+    flags = os.O_RDONLY
+    if hasattr(os, "O_DIRECTORY"):
+        flags |= os.O_DIRECTORY
+    descriptor = os.open(path, flags)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _verify_staging_leaf(staging_leaf: Path, prepared: PreparedAnalysis) -> None:
+    actual_names = {item.name for item in staging_leaf.iterdir()}
+    if actual_names != set(ALL_DERIVED_FILES):
+        raise DerivedPublicationError("staging directory has an invalid file set")
+    for filename in ALL_DERIVED_FILES:
+        path = staging_leaf / filename
+        if path.is_symlink() or not path.is_file():
+            raise DerivedPublicationError(
+                f"staged derived artifact is not a regular file: {filename}"
+            )
+        if path.read_bytes() != prepared.files[filename]:
+            raise DerivedPublicationError(
+                f"staged derived artifact differs from prepared bytes: {filename}"
+            )
+
+    try:
+        manifest = json.loads(
+            (staging_leaf / DERIVED_MANIFEST_FILE).read_text(encoding="utf-8")
+        )
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise DerivedPublicationError("staged manifest cannot be decoded") from error
+    if manifest.get("algorithm") != "sha256":
+        raise DerivedPublicationError("staged manifest algorithm is invalid")
+    if manifest.get("schema_version") != DERIVED_SCHEMA_VERSION:
+        raise DerivedPublicationError("staged manifest schema version is invalid")
+    entries = manifest.get("files")
+    if not isinstance(entries, dict) or set(entries) != set(REQUIRED_DERIVED_FILES):
+        raise DerivedPublicationError("staged manifest file set is invalid")
+    for filename in REQUIRED_DERIVED_FILES:
+        content = (staging_leaf / filename).read_bytes()
+        expected = {
+            "sha256": sha256_bytes(content),
+            "bytes": len(content),
+            "lines": content.count(b"\n"),
+        }
+        if entries[filename] != expected:
+            raise DerivedPublicationError(
+                f"staged manifest entry is invalid: {filename}"
+            )
+
+
+def _raise_final_collision(run_id: str) -> None:
+    raise DerivedCollisionError(
+        f"derived output already exists for run ID {run_id!r}"
+    )
 
 
 def write_prepared_analysis(
@@ -975,14 +1183,56 @@ def write_prepared_analysis(
     run_dir: Path | str,
     derived_root: Path | str,
     before_claim: Optional[Callable[[], None]] = None,
+    publication_hook: Optional[PublicationHook] = None,
 ) -> Path:
+    (
+        version_directory,
+        staging_directory,
+        lock_path,
+        final_leaf,
+    ) = _prepare_publication_layout(run_dir, derived_root, prepared.run_id)
     if before_claim is not None:
         before_claim()
-    leaf = claim_derived_directory(run_dir, derived_root, prepared.run_id)
-    for filename in (*REQUIRED_DERIVED_FILES, "derived_manifest.json"):
-        with (leaf / filename).open("xb") as handle:
-            handle.write(prepared.files[filename])
-    return leaf
+    with _publication_lock(lock_path, prepared.run_id):
+        if _path_lexists(final_leaf):
+            _raise_final_collision(prepared.run_id)
+        staging_leaf = _create_staging_leaf(staging_directory, prepared.run_id)
+        checkpoints = {
+            "analysis_meta.json": "after_analysis_meta_write",
+            "events.jsonl": "after_events_write",
+            "receiver_expression_status.jsonl": "after_receiver_status_write",
+            "summary.json": "after_summary_write",
+        }
+        for filename in REQUIRED_DERIVED_FILES:
+            _write_fsynced(staging_leaf / filename, prepared.files[filename])
+            if publication_hook is not None:
+                publication_hook(checkpoints[filename], staging_leaf)
+        _write_manifest_with_checkpoint(
+            staging_leaf / DERIVED_MANIFEST_FILE,
+            prepared.files[DERIVED_MANIFEST_FILE],
+            staging_leaf,
+            publication_hook,
+        )
+        _verify_staging_leaf(staging_leaf, prepared)
+        _fsync_directory(staging_leaf)
+        if publication_hook is not None:
+            publication_hook(
+                "after_manifest_verification_before_publish",
+                staging_leaf,
+            )
+        if _path_lexists(final_leaf):
+            _raise_final_collision(prepared.run_id)
+        try:
+            os.rename(staging_leaf, final_leaf)
+        except OSError as error:
+            if _path_lexists(final_leaf):
+                raise DerivedCollisionError(
+                    f"derived output already exists for run ID {prepared.run_id!r}"
+                ) from error
+            raise DerivedPublicationError(
+                f"staged result cannot be published: {type(error).__name__}"
+            ) from error
+    return final_leaf
 
 
 def analyze_run(
@@ -992,6 +1242,7 @@ def analyze_run(
     metric_spec_sha256: str,
     derived_root: Path | str,
     before_claim: Optional[Callable[[], None]] = None,
+    publication_hook: Optional[PublicationHook] = None,
 ) -> Path:
     prepared = prepare_analysis(
         run_dir,
@@ -1004,4 +1255,5 @@ def analyze_run(
         run_dir,
         derived_root,
         before_claim=before_claim,
+        publication_hook=publication_hook,
     )

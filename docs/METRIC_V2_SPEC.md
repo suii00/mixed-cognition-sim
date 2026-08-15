@@ -226,17 +226,47 @@ by expression ID and receiver ID. Registry expressions sort by expression ID.
 
 ## 12. Derived output schema and immutability
 
-The output leaf is:
+The publication layout is:
+
+```text
+<derived_root>/metric-v2.0.0/
+  .locks/<run_id>.lock
+  .staging/<run_id>-<temporary-id>/
+  <run_id>/
+```
+
+All input validation and derived byte construction occur before publication.
+Publication then uses a non-blocking, per-run operating-system file lock. Lock
+ownership belongs to the open process handle and is released by the operating
+system when that handle closes or the process terminates; the persistent lock
+file is not itself an ownership claim. A busy lock and an existing final leaf
+are both explicit collisions. Concurrent publishers therefore have exactly one
+owner.
+
+While holding the lock, the owner creates a unique staging leaf under
+`.staging` on the same filesystem as the final leaf. It writes all five files,
+flushes and `fsync`s every file, rereads the staged bytes, and verifies the
+required file set plus every manifest hash, byte count, and newline count. Only
+after that verification may it atomically rename the staging directory to:
 
 ```text
 <derived_root>/metric-v2.0.0/<run_id>/
 ```
 
-All validation and derived byte construction occur before claiming the final
-leaf. The final leaf is claimed with an exclusive `mkdir(exist_ok=False)`
-operation. Existing leaves are collisions: they are not reused, renamed,
-suffixed, appended to, or overwritten. Concurrent claimers have exactly one
-owner. The derived root may not resolve inside the raw run, including through a
+The final leaf is therefore a publication boundary: if it exists, it represents
+only a completed, manifest-verified result. Existing final leaves are immutable
+collisions; they are never reused, renamed, suffixed, appended to, removed,
+replaced, or overwritten.
+
+A staging leaf is private, non-published, and ineligible as a research result,
+even if its staged `analysis_meta.json` already contains `"status":"completed"`.
+Failure or abrupt termination before atomic rename must leave the final leaf
+absent. A residual staging leaf does not block a later attempt, which creates a
+new unique staging leaf. Normal analysis neither treats residual staging as a
+result nor deletes it; inspection and cleanup are separate administrative
+operations so one process cannot remove another process's live staging data.
+
+The derived root may not resolve inside the raw run, including through a
 symbolic link. Raw files are read-only inputs and are never changed.
 
 Successful leaves contain:
@@ -289,4 +319,9 @@ simultaneous origin, memory/reasoning exclusion, unregistered future text,
 registry hash mismatch, invalid registries, invalid raw runs, sequential and
 process-race collisions, raw immutability, deterministic byte equality, exact
 raw provenance, zero denominators, untrusted text non-execution, exact token
-boundaries, and output-path/symlink rejection.
+boundaries, and output-path/symlink rejection. Publication fixtures inject
+failure after each of the first four file writes, during manifest writing, and
+after manifest verification but before rename. A separate spawned-child fixture
+terminates the publication owner while it holds the lock. Every interruption
+must leave no final leaf, preserve raw hashes, remain absent from published
+result enumeration, and permit a later complete, manifest-valid publication.

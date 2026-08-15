@@ -6,6 +6,7 @@ import multiprocessing
 import os
 import subprocess
 import tempfile
+import time
 import unittest
 import urllib.request
 from pathlib import Path
@@ -14,6 +15,7 @@ from unittest import mock
 from engine.provenance import RunLifecycle
 from tools.metric_v2 import main as metric_main
 from tools.metric_v2_core import (
+    ALL_DERIVED_FILES,
     DERIVED_SCHEMA_VERSION,
     METRIC_SPEC_PATH,
     METRIC_VERSION,
@@ -34,6 +36,10 @@ from tools.validate_run import validate_run
 REPO_ROOT = Path(__file__).resolve().parents[1]
 EXPRESSION_ID = "expr-0001"
 EXPRESSION_TEXT = "blue lantern"
+
+
+class _InjectedPublicationFailure(RuntimeError):
+    pass
 
 
 def canonical_document(value: dict) -> bytes:
@@ -92,6 +98,30 @@ def _analyze_in_process(
         queue.put(("error", type(error).__name__))
     else:
         queue.put(("success", output.name))
+
+
+def _analyze_and_block_in_process(
+    run_dir: str,
+    registry_path: str,
+    registry_sha256: str,
+    metric_spec_sha256: str,
+    derived_root: str,
+    entered,
+) -> None:
+    def block_after_first_write(checkpoint: str, _staging_leaf: Path) -> None:
+        if checkpoint == "after_analysis_meta_write":
+            entered.set()
+            while True:
+                time.sleep(1)
+
+    analyze_run(
+        run_dir,
+        registry_path,
+        registry_sha256,
+        metric_spec_sha256,
+        derived_root,
+        publication_hook=block_after_first_write,
+    )
 
 
 class MetricV2Tests(unittest.TestCase):
@@ -318,6 +348,7 @@ class MetricV2Tests(unittest.TestCase):
         derived_root: Path | None = None,
         registry_path: Path | None = None,
         registry_sha256: str | None = None,
+        publication_hook=None,
     ) -> Path:
         return analyze_run(
             run_dir,
@@ -325,6 +356,7 @@ class MetricV2Tests(unittest.TestCase):
             registry_sha256 or self.registry_sha256,
             self.spec_sha256,
             derived_root or self.derived_root,
+            publication_hook=publication_hook,
         )
 
     @staticmethod
@@ -335,6 +367,64 @@ class MetricV2Tests(unittest.TestCase):
             if item["expression_id"] == EXPRESSION_ID
             and item["receiver_id"] == receiver_id
         )
+
+    @staticmethod
+    def published_run_ids(derived_root: Path) -> list[str]:
+        version_directory = derived_root / METRIC_VERSION
+        if not version_directory.exists():
+            return []
+        return sorted(
+            item.name
+            for item in version_directory.iterdir()
+            if item.is_dir() and not item.name.startswith(".")
+        )
+
+    def assert_valid_derived_leaf(self, leaf: Path) -> None:
+        self.assertEqual(
+            {item.name for item in leaf.iterdir()},
+            set(ALL_DERIVED_FILES),
+        )
+        manifest = json.loads(
+            (leaf / "derived_manifest.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(set(manifest["files"]), set(ALL_DERIVED_FILES[:-1]))
+        for filename, entry in manifest["files"].items():
+            raw = (leaf / filename).read_bytes()
+            self.assertEqual(entry["sha256"], sha256_bytes(raw))
+            self.assertEqual(entry["bytes"], len(raw))
+            self.assertEqual(entry["lines"], raw.count(b"\n"))
+
+    def assert_interrupted_publication_is_retryable(self, checkpoint: str) -> None:
+        run_id = f"interrupted-{checkpoint.replace('_', '-')}"
+        run = self.create_run(
+            run_id,
+            steps=1,
+            agent_blocs=("alpha",),
+        )
+        raw_before = directory_hashes(run)
+
+        def inject_failure(actual: str, _staging_leaf: Path) -> None:
+            if actual == checkpoint:
+                raise _InjectedPublicationFailure(checkpoint)
+
+        with self.assertRaises(_InjectedPublicationFailure):
+            self.analyze(run, publication_hook=inject_failure)
+
+        version_directory = self.derived_root / METRIC_VERSION
+        final_leaf = version_directory / run_id
+        self.assertFalse(os.path.lexists(final_leaf))
+        self.assertNotIn(run_id, self.published_run_ids(self.derived_root))
+        self.assertEqual(directory_hashes(run), raw_before)
+        stale_staging = sorted(
+            (version_directory / ".staging").glob(f"{run_id}-*")
+        )
+        self.assertEqual(len(stale_staging), 1)
+
+        leaf = self.analyze(run)
+        self.assertEqual(leaf, final_leaf)
+        self.assertEqual(directory_hashes(run), raw_before)
+        self.assertTrue(stale_staging[0].exists())
+        self.assert_valid_derived_leaf(leaf)
 
     def test_exact_token_sequence_normalization_and_boundaries(self):
         candidate = tokenize("  BLUE\u3000Lantern ")
@@ -636,6 +726,47 @@ class MetricV2Tests(unittest.TestCase):
         )
         self.assertEqual(directory_hashes(run), raw_before)
 
+    def test_cli_success_exit_zero(self):
+        run = self.create_run(
+            "cli-success",
+            steps=1,
+            agent_blocs=("alpha",),
+        )
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            exit_code = metric_main([
+                "analyze",
+                "--run-dir", str(run),
+                "--registry", str(self.registry_path),
+                "--registry-sha256", self.registry_sha256,
+                "--metric-spec-sha256", self.spec_sha256,
+                "--derived-root", str(self.derived_root),
+            ])
+        self.assertEqual(exit_code, 0, stdout.getvalue())
+        self.assert_valid_derived_leaf(
+            self.derived_root / METRIC_VERSION / "cli-success"
+        )
+
+    def test_cli_unexpected_failure_exit_one(self):
+        stderr = io.StringIO()
+        with (
+            mock.patch(
+                "tools.metric_v2.analyze_run",
+                side_effect=OSError("injected publication failure"),
+            ),
+            contextlib.redirect_stderr(stderr),
+        ):
+            exit_code = metric_main([
+                "analyze",
+                "--run-dir", str(self.root / "unused-run"),
+                "--registry", str(self.registry_path),
+                "--registry-sha256", self.registry_sha256,
+                "--metric-spec-sha256", self.spec_sha256,
+                "--derived-root", str(self.derived_root),
+            ])
+        self.assertEqual(exit_code, 1, stderr.getvalue())
+        self.assertIn("OSError", stderr.getvalue())
+
     def test_invalid_raw_run_creates_no_leaf_and_gets_no_further_mutation(self):
         run = self.create_run(
             "invalid-raw",
@@ -715,6 +846,78 @@ class MetricV2Tests(unittest.TestCase):
                 process.join(timeout=5)
             queue.close()
             queue.join_thread()
+
+    def test_failure_after_analysis_meta_write_is_retryable(self):
+        self.assert_interrupted_publication_is_retryable(
+            "after_analysis_meta_write"
+        )
+
+    def test_failure_after_events_write_is_retryable(self):
+        self.assert_interrupted_publication_is_retryable("after_events_write")
+
+    def test_failure_after_receiver_status_write_is_retryable(self):
+        self.assert_interrupted_publication_is_retryable(
+            "after_receiver_status_write"
+        )
+
+    def test_failure_after_summary_write_is_retryable(self):
+        self.assert_interrupted_publication_is_retryable("after_summary_write")
+
+    def test_failure_during_manifest_write_is_retryable(self):
+        self.assert_interrupted_publication_is_retryable("during_manifest_write")
+
+    def test_failure_after_manifest_verification_is_retryable(self):
+        self.assert_interrupted_publication_is_retryable(
+            "after_manifest_verification_before_publish"
+        )
+
+    def test_abrupt_child_termination_releases_lock_and_allows_retry(self):
+        run_id = "abrupt-publication-termination"
+        run = self.create_run(
+            run_id,
+            steps=1,
+            agent_blocs=("alpha",),
+        )
+        raw_before = directory_hashes(run)
+        context = multiprocessing.get_context("spawn")
+        entered = context.Event()
+        process = context.Process(
+            target=_analyze_and_block_in_process,
+            args=(
+                str(run),
+                str(self.registry_path),
+                self.registry_sha256,
+                self.spec_sha256,
+                str(self.derived_root),
+                entered,
+            ),
+        )
+        try:
+            process.start()
+            self.assertTrue(
+                entered.wait(timeout=20),
+                f"child did not reach staging checkpoint; exit={process.exitcode}",
+            )
+            self.assertTrue(process.is_alive())
+            final_leaf = self.derived_root / METRIC_VERSION / run_id
+            self.assertFalse(os.path.lexists(final_leaf))
+            self.assertNotIn(run_id, self.published_run_ids(self.derived_root))
+
+            process.terminate()
+            process.join(timeout=20)
+            self.assertFalse(process.is_alive())
+            self.assertNotEqual(process.exitcode, 0)
+            self.assertFalse(os.path.lexists(final_leaf))
+            self.assertEqual(directory_hashes(run), raw_before)
+
+            leaf = self.analyze(run)
+            self.assertEqual(leaf, final_leaf)
+            self.assertEqual(directory_hashes(run), raw_before)
+            self.assert_valid_derived_leaf(leaf)
+        finally:
+            if process.is_alive():
+                process.terminate()
+            process.join(timeout=5)
 
     def test_analysis_keeps_entire_raw_directory_byte_identical(self):
         run = self.create_run(
