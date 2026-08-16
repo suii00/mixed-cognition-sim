@@ -88,8 +88,27 @@ Evidence class must be one of: `direct observation`, `mechanical derivation`,
 - Agent count and step count held constant: bloc order/count is exactly
   `alpha`, `beta`, `neutral`, four agents each (12 total); step count is copied
   unchanged across paired cells but its production value is not yet frozen.
-- Runtime/backend/checkpoint policy: `NOT YET FROZEN`; Gate 3 executes only a
-  no-network scripted CPU transport and makes no backend/model claim.
+- Runtime/backend/checkpoint policy: Gate 3 executed only a no-network scripted
+  CPU transport and made no backend/model claim. Gate 4 scope-limited Ollama
+  capacity evidence and one auxiliary current-prompt smoke now exist, while
+  formal Gate 4A reference evidence is `IN PROGRESS / NOT YET FROZEN`; Gate 4B
+  vLLM work is
+  `DEFERRED / BLOCKED ON OLLAMA EVIDENCE FREEZE`.
+- Gate 4 backend-smoke specification:
+  `docs/GATE4_BACKEND_SMOKE_SPEC.md`, `gate4-backend-smoke-v1.0.0`, SHA-256
+  `e0d55545b57a42b1e6c28c31a137f3f19e1413e4078cfb2851e1a47f009d2065`.
+- Gate 4 candidate-evidence index:
+  `docs/GATE4_BACKEND_EVIDENCE_LEDGER.md`,
+  `gate4-backend-evidence-ledger-v1.2.0`, SHA-256
+  `c2295d75391d1e40af8a1234d8f9037410e3506e6024e6f92675098f635780c3`.
+- Gate 4 evidence-publication contract:
+  `docs/GATE4_EVIDENCE_PUBLICATION_SPEC.md`,
+  `gate4-backend-evidence-publication-v1.0.0`, SHA-256
+  `b204214fc9ee063d6a5fad956a2a59ac161f923986f524e9921055cca47eeed1`.
+- FP16 three-endpoint prompt-smoke specification:
+  `docs/GATE4A_FP16_THREE_ENDPOINT_PROMPT_SMOKE_SPEC.md`,
+  `gate4a-fp16-three-endpoint-prompt-smoke-v1.0.0`, SHA-256
+  `0e24765e78b858a0cbf27e6f66a0cc745aa188c3fb52ab1dafa51559352c6cee`.
 - Prompt contains no bloc/model/self-or-other model identity: confirmed by the
   unchanged prompt hash; edge policy is applied structurally during delivery.
 - Prompt contains no desired result, qualitative evaluation, optimization target,
@@ -155,7 +174,7 @@ Evidence class must be one of: `direct observation`, `mechanical derivation`,
   rule; delivery starts only after all Phase 1 results commit.
 - Gate 3 matrix/edge specification, Gate 4 documentation-corrected working
   copy: `docs/EIGHT_CELL_MATRIX_SPEC.md`, `eight-cell-matrix-v1.1.1`, SHA-256
-  `fe35f3caeb0b1fc6aeb70f334bfcd05e39a7a79612cbf44e69093e02d3617e1f`.
+  `c904e2b23f1798c691a55ba805fc5e8c57c1aeadbd5ef6430f00c9e70c8206df`.
   The Gate 3 frozen specification bytes and hash remain recorded in section 12
   and at tag `gate3-frozen-20260816`.
 - Effective edge policy: `agents.edge_policy` accepts exactly `full` or
@@ -199,11 +218,29 @@ Evidence class must be one of: `direct observation`, `mechanical derivation`,
   fixture, concurrency 1 and 3 have byte-identical scientific raw JSONL plus
   equal agent/RNG/counter/manifest/request-transcript state. No equivalent claim
   is made for actual LLM output.
-- Ollama reference transport: unchanged `engine.sim.call_ollama`, resolved at
-  invocation and supplied only worker-local telemetry. Real network/model calls
-  were prohibited in implementation tests.
-- vLLM transport/API contract and backend smoke: deferred; no vLLM conformance
-  or runtime claim is recorded by Gate 2 implementation evidence.
+- Gate 4A Ollama reference transport: the captured current
+  `engine.sim.call_ollama` native `/api/chat` path was resolved at invocation
+  and supplied only worker-local telemetry. The native client gained
+  evidence-capture payload/status/envelope observers; prompt and parse semantics
+  remained unchanged. Real network/model calls were prohibited in Gate 2
+  implementation tests. Scope-limited generic real-backend calls and one
+  complete three-agent, one-step, six-call `Simulation.run()` current-prompt
+  auxiliary smoke are indexed separately. The latter completed Phase 1 raw
+  recording, Phase 2 delivery, Phase 3 action/memory recording, Phase 4
+  movement, run terminalization, and in-process strict validation, with six
+  HTTP 200 responses, zero recorded retry/transport/parse failures,
+  three-endpoint FP16 residency, and effective cleanup with retained
+  post-unload diagnostic warnings. Its structured raw files and strict
+  validator do not independently verify post-Phase 4 final positions or final
+  in-memory agent state. Independent audit also found publication-contract
+  deviations, so the operational result is not a specification-conformant
+  evidence publication. It is not a formal Gate 4A stage; the 12-agent QQQ,
+  GGG, LLL, and HET reference cells, eight-cell smoke, and independent
+  reference-backend freeze remain incomplete.
+- Gate 4B vLLM transport/API contract: deferred until Gate 4A evidence freeze.
+  Its planned provider/transport/endpoint contract is `vllm`,
+  `openai_compatible`, and `/v1/chat/completions`; no vLLM conformance or runtime
+  claim is currently recorded.
 - Required version consequence: changes to snapshots, phase commit/barriers,
   error selection, ordering, telemetry, concurrency interpretation,
   worker/coordinator ownership, or backend contract require a
@@ -561,8 +598,10 @@ manifest does not authorize or complete the unfrozen production analysis plan.
   28 abbreviates the plan schema as `eight-cell-plan-v1.1.0`; the canonical
   implementation, artifacts, tests, and protocol use
   `eight-cell-matrix-plan-v1.1.0`. After creating the frozen tag, the Gate 4
-  working copy corrected that documentation-only cross-reference and now has
-  SHA-256 `fe35f3caeb0b1fc6aeb70f334bfcd05e39a7a79612cbf44e69093e02d3617e1f`.
+  working copy corrected that documentation-only cross-reference and later
+  linked its deferred backend scope to the Gate 4 backend-smoke specification.
+  The current working-copy SHA-256 is
+  `c904e2b23f1798c691a55ba805fc5e8c57c1aeadbd5ef6430f00c9e70c8206df`.
   The Gate 3 frozen tag retains the audited pre-erratum hash
   `96a4ddefbef7a7c9ab8d5a41cb6d438edd7a18b20c78e8154681ac9c61c44e5a`.
 - Gate 3 evidence boundary: the eight-cell smoke used only temporary plans,
@@ -591,12 +630,51 @@ manifest does not authorize or complete the unfrozen production analysis plan.
   documentation erratum is retained; no implementation or eligibility finding
   remains open at Gate 3 freeze.
 - Gate 3 freeze: `PASS / FROZEN` at tag `gate3-frozen-20260816`.
+- Gate 4 auxiliary capacity/residency preflight: `PASS — SCOPE LIMITED` for
+  evidence ID `pinned3-20260816T071057Z`, indexed by
+  `docs/GATE4_BACKEND_EVIDENCE_LEDGER.md`. This candidate demonstrates only the
+  recorded UUID-pinned FP16 residency and cleanup envelope;
+  `gate4_formal_pass=false` and `research_eligible=false`.
+- Gate 4 auxiliary current-prompt smoke, evidence directory
+  `prompt6-20260816T082431Z`, simulation run ID
+  `prompt6-fp16-20260816T082929Z`, indexed by the same ledger. The retained
+  two-axis classification is
+  `operational backend result = PASS_WITH_WARNINGS — SCOPE LIMITED` and
+  `evidence publication conformance = NONCONFORMING / NOT FORMALLY ACCEPTED`.
+  The retained result covers one complete `Simulation.run()` lifecycle for the
+  declared three-agent, one-step configuration, six sequential native calls, the
+  post-run three-endpoint FP16 residency checkpoint, and effective cleanup.
+  Phase 2 delivery is retained in the message log and reflected in the exact
+  Phase 3 prompts; Phase 4 execution is retained in the captured stdout. The
+  structured raw files and strict validator do not independently verify
+  post-Phase 4 final positions or final in-memory agent state. Post-unload
+  GPU-discovery/free-memory warnings are retained; their cause and endpoint
+  reuse after unload are not established. The declared summary-schema ID,
+  exact formal/backend-freeze fields, publication order, bundle-local
+  authorization record, cleanup-status extension, and missing independent
+  validator-process exit-status artifact have the deviations enumerated in the
+  ledger. The nested summary/core fields deny formal Gate 4 promotion and
+  retain `research_eligible=false`; no backend freeze is claimed.
+- Gate 4 evidence-publication implementation: `CPU STRUCTURAL PASS — 46/46`
+  for the generic atomic publisher and an independently implemented S/I/R
+  verifier. The generic profile is fail-closed at
+  `operational_backend_result=NOT_EVALUATED` and cannot promote arbitrary raw
+  evidence. This is not GPU authorization: a workload-specific content
+  validator plus pre-workload approval/hash/limit integration in the
+  orchestrator remain mandatory before endpoint reuse or another model call.
+- Gate 4A formal result: `NOT PASSED / NOT FROZEN`; work status remains
+  `IN PROGRESS`. Gate 4A-1 through Gate 4A-4 and the independent Ollama
+  reference-backend evidence freeze remain outstanding. No 12-agent reference
+  cell or eight-cell real-backend smoke has run. Scope-limited auxiliary smoke
+  does not authorize a pilot or research run.
+- Gate 4B status: `DEFERRED / BLOCKED ON OLLAMA EVIDENCE FREEZE`. No adapter,
+  vLLM request, conformance evidence, or runtime claim exists at this state.
 - Production candidate registry: `NOT YET FROZEN`.
 - Backend/model artifacts: `NOT YET FROZEN`.
 - Readiness verdict (`NOT READY` until every required gate has evidence):
   `NOT READY`. Gates 1, 2, and 3 are frozen. Production registry, production
-  model/backend artifacts, experimental values, pilot seeds, and run-start
-  approval remain outstanding.
+  model/backend artifacts, Gate 4A evidence and freeze, Gate 4B adapter evidence,
+  experimental values, pilot seeds, and run-start approval remain outstanding.
 - Pilot authorization: `NO`.
 - Approved run-start window: `NO`; explicit approval remains outstanding.
 
