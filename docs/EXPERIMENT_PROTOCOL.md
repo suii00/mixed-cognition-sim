@@ -57,21 +57,43 @@ Evidence class must be one of: `direct observation`, `mechanical derivation`,
 
 | Condition ID | Manipulated variable(s) | Value/config reference | Control role | Planned paired contrast |
 |---|---|---|---|---|
-| `<UNFILLED>` | `<UNFILLED>` | `<UNFILLED>` | `<UNFILLED>` | `<UNFILLED>` |
+| `het-full` | Model condition; edge policy | HET rotation; `full`; `docs/EIGHT_CELL_MATRIX_SPEC.md` | Full communication-edge control for HET | `het-within-bloc` at the same replicate/world seed |
+| `het-within-bloc` | Model condition; edge policy | HET rotation; `within_bloc_only`; matrix spec | Cross-bloc-edge ablation for HET | `het-full` at the same replicate/world seed |
+| `qqq-full` | Model condition; edge policy | QQQ; `full`; matrix spec | Full communication-edge control for QQQ | `qqq-within-bloc` at the same replicate/world seed |
+| `qqq-within-bloc` | Model condition; edge policy | QQQ; `within_bloc_only`; matrix spec | Cross-bloc-edge ablation for QQQ | `qqq-full` at the same replicate/world seed |
+| `ggg-full` | Model condition; edge policy | GGG; `full`; matrix spec | Full communication-edge control for GGG | `ggg-within-bloc` at the same replicate/world seed |
+| `ggg-within-bloc` | Model condition; edge policy | GGG; `within_bloc_only`; matrix spec | Cross-bloc-edge ablation for GGG | `ggg-full` at the same replicate/world seed |
+| `lll-full` | Model condition; edge policy | LLL; `full`; matrix spec | Full communication-edge control for LLL | `lll-within-bloc` at the same replicate/world seed |
+| `lll-within-bloc` | Model condition; edge policy | LLL; `within_bloc_only`; matrix spec | Cross-bloc-edge ablation for LLL | `lll-full` at the same replicate/world seed |
 
-- Experimental unit: `<UNFILLED>`
-- Pairing/blocking unit: `<UNFILLED>`
-- Condition assignment procedure: `<UNFILLED>`
-- World/scenario held constant: `<UNFILLED>`
-- Initial-state procedure held constant: `<UNFILLED>`
-- Prompt semantics/hash held constant: `<UNFILLED>`
-- Sampling parameters held constant: `<UNFILLED>`
-- Communication rules except the declared intervention held constant: `<UNFILLED>`
-- Agent count and step count held constant: `<UNFILLED>`
-- Runtime/backend/checkpoint policy: `<UNFILLED>`
-- Prompt contains no bloc/model/self-or-other model identity: `<UNFILLED>`
+- Experimental unit: one complete, immutable simulation run.
+- Pairing/blocking unit: one replicate/world seed shared by all eight cells.
+- Condition assignment procedure: fixed canonical cell order. HET rotates model
+  slots across `alpha`, `beta`, and `neutral` by replicate index modulo three;
+  QQQ/GGG/LLL assign one slot homogeneously. Production model profiles remain
+  `NOT YET FROZEN`.
+- World/scenario held constant: within a replicate, the world seed, duration,
+  half-space, places, and all non-manipulated config fields are identical and
+  checked by `paired_control_hash` and `initial_state_input_hash`.
+- Initial-state procedure held constant: all eight cells use the same world
+  generation inputs; the CPU regression fixture also compares actual initial
+  positions. Production seed values remain `NOT YET FROZEN`.
+- Prompt semantics/hash held constant: `engine/prompts.py` is unchanged; SHA-256
+  `f414ab30a963636d80239644c2d3770672c77d5b8bdde027de2eb15a0d08bc3d`.
+- Sampling parameters held constant: copied from one hash-pinned base config
+  and included in the paired-control hash; production values are not frozen.
+- Communication rules except the declared intervention held constant: geometry,
+  place boundary, canonical ordering, and delivery phase are identical. Only
+  cross-bloc edge eligibility differs.
+- Agent count and step count held constant: bloc order/count is exactly
+  `alpha`, `beta`, `neutral`, four agents each (12 total); step count is copied
+  unchanged across paired cells but its production value is not yet frozen.
+- Runtime/backend/checkpoint policy: `NOT YET FROZEN`; Gate 3 executes only a
+  no-network scripted CPU transport and makes no backend/model claim.
+- Prompt contains no bloc/model/self-or-other model identity: confirmed by the
+  unchanged prompt hash; edge policy is applied structurally during delivery.
 - Prompt contains no desired result, qualitative evaluation, optimization target,
-  or behavioral hint: `<UNFILLED>`
+  or behavioral hint: confirmed by the unchanged prompt hash.
 
 ## 4. Pilot and confirmatory run plan
 
@@ -131,6 +153,25 @@ Evidence class must be one of: `direct observation`, `mechanical derivation`,
 - Phase 2 delivery boundary: sequential sender/receiver ID order using the
   Phase 1 step-start position snapshot and the unchanged communication/place
   rule; delivery starts only after all Phase 1 results commit.
+- Gate 3 matrix/edge specification: `docs/EIGHT_CELL_MATRIX_SPEC.md`,
+  `eight-cell-matrix-v1.0.0`, SHA-256
+  `0b1ea989c956fa6e82800fc82ef41186ad460c96e6e38ce2a82e241e41add4db`.
+- Effective edge policy: `agents.edge_policy` accepts exactly `full` or
+  `within_bloc_only`, defaults effectively to `full`, is saved in the owned
+  effective config, and contributes to the config hash. Legacy saved configs
+  without the field are reconstructed as `full` by the strict validator.
+- `full` policy: the Gate 2 distance/place boundary is unchanged and ignores
+  bloc membership. This is the paired communication-edge control.
+- `within_bloc_only` policy: the same distance/place boundary is applied first,
+  then sender and receiver bloc names must match. Cross-bloc edges are disabled,
+  while eligible same-bloc communication remains; this is not a
+  communication-off condition. Bloc is a structural partition only in this
+  ablation, and no bloc or model identity enters prompts.
+- Communication-policy regression evidence: omitted versus explicit `full`
+  produces byte-identical scientific raw logs and equal state; valid `full` and
+  `within_bloc_only` runs pass strict validation; recomputed-manifest fixtures
+  with an injected cross-bloc receiver or an omitted expected same-bloc
+  receiver fail. Receiver IDs remain canonical.
 - Phase 3 snapshot: only after all deliveries, the coordinator copies every
   position, recent memory/message context, place, and occupancy and constructs
   every Phase 3 prompt/request before dispatch.
@@ -309,14 +350,34 @@ Gate 1 frozen metric evidence:
 - Deterministic ordering/reproduction check: canonical compact JSON with sorted
   keys and fixed event/pair ordering; different derived roots are byte-identical
   in `test_different_derived_roots_are_byte_identical`.
-- Batch manifest including completed, null, negative, failed, and aborted runs: `<UNFILLED>`
+- Gate 3 batch path and artifacts: `<output_root>/batch_<matrix_id>/` contains
+  atomic `batch_meta.json`, canonical `plan.json`, `planned_runs.jsonl`,
+  `plan_manifest.json`, one `configs/<run_id>.json` per planned run,
+  `runs/output_<run_id>/` raw run directories, and final
+  `batch_manifest.json`.
+- Batch no-overwrite rule: the matrix ID claims its batch directory by an
+  exclusive create before any transport call. There is no suffix, append,
+  overwrite, replacement, or resume; collision requires a new matrix ID.
+- Batch lifecycle and manifest: status is `running`, `completed`, `failed`, or
+  `aborted` and metadata is atomically replaced. `completed` requires all
+  planned runs completed, strict and smoke-profile PASS, plan/config/run hashes
+  consistent, and both manifests complete. Batch metadata pins the plan
+  manifest and final batch manifest hashes.
+- Failed/aborted/not-started retention: the failing raw run and every planned
+  row are preserved; later rows remain explicitly `not_started`. Validators are
+  read-only. The Gate 3 batch manifest covers orchestration/integrity evidence;
+  production plans, seeds, registries, backends, and empirical outcomes remain
+  unfrozen.
+- Null/negative empirical-outcome treatment: not exercised by scripted smoke;
+  the production analysis/batch rule remains `<UNFILLED>`.
 
 Raw runs are immutable inputs. Input validation and all derived bytes are built
 before publication. A final leaf exists only after all required files and their
 manifest have been verified. Residual `.staging` leaves are unpublished,
 ineligible, ignored by retry, and not automatically removed by analysis.
 `derived_manifest.json` hashes the other required derived files; it is not a
-replacement for the still-unfilled multi-run batch manifest.
+replacement for the Gate 3 run/batch manifest. Conversely, the Gate 3 smoke
+manifest does not authorize or complete the unfrozen production analysis plan.
 
 ## 12. Pre-run readiness gates
 
@@ -358,6 +419,16 @@ replacement for the still-unfilled multi-run batch manifest.
 | Transport-failure phase atomicity | Phase 1/3 blocked multi-request failures and multiple-error fixtures | All requests and telemetry settle; no primary log/state partial commit; deterministic minimum failing agent; executor threads release | Gate 2 targeted suite at `4f893b3...` | PASS at frozen `34c6b80...` |
 | Unexpected-worker-failure handling | Mixed transport/unexpected and multiple-unexpected fixtures | Unexpected error wins over transport, original type is re-raised, minimum unexpected agent fixes context, no partial commit or thread leak | Gate 2 targeted suite at `4f893b3...` | PASS at frozen `34c6b80...` |
 | Effective concurrency provenance | Omitted/explicit/invalid settings, caller-ownership, persisted snapshot, and config-hash fixtures | Effective positive integer is owned and persisted; invalid types/values rejected; different concurrency changes config hash | Gate 2 targeted suite at `4f893b3...` | PASS at frozen `34c6b80...` |
+| Communication edge-policy validation | Default/explicit/invalid config, backward-compatible full, within-bloc delivery, and recomputed-manifest tamper fixtures | Effective policy is owned, persisted, and hashed; full preserves the old boundary; within retains same-bloc and rejects cross-bloc delivery | `tests/test_communication_policy.py`; 5/5 PASS at `c782356...` | `<pending independent checker>` |
+| Fixed eight-cell generation | One-replicate canonical generation and exact cell/order fixtures | Exactly HET/QQQ/GGG/LLL × full/within in the normative eight-row order | `tests/test_eight_cell_runner.py`; implementation `c782356...` | `<pending independent checker>` |
+| HET model-to-bloc rotation | Replicate indices 0, 1, 2, and 3 plus homogeneous assignment fixtures | HET uses the fixed modulo-three rotation; QQQ/GGG/LLL use one slot for all blocs | `test_fixed_cells_rotations_homogeneous_and_paired_hashes` | `<pending independent checker>` |
+| Paired seed/config invariants | Eight generated configs, paired hashes, world-input hashes, and constructed initial positions | Seed, non-manipulated config, prompt hash, world inputs, and actual initial positions agree across each paired replicate | `test_paired_configs_produce_identical_initial_positions`; paired-hash assertions | `<pending independent checker>` |
+| Deterministic plan/config bundle | Same plan rendered under two temporary roots | Canonical plan, rows, configs, and plan manifest are byte-identical and contain no runtime path or timestamp | `test_static_bundle_is_byte_identical_across_roots` | `<pending independent checker>` |
+| Eight-cell scripted CPU smoke | 12 agents, one temporary replicate, deterministic no-network transport | 8/8 complete and strict/smoke valid; full has cross-bloc delivery; within has same-bloc and zero cross-bloc delivery | `test_eight_cell_smoke_manifest_policies_and_sequential_collision` | `<pending independent checker>` |
+| Batch manifest completeness | Successful and injected-failure batches | Every planned row, status, config/run/raw/validator evidence, and manifest pin is retained; incomplete batches never report completed | runner and research-validator targeted suites at `c782356...` | `<pending independent checker>` |
+| Batch collision/no-overwrite | Sequential byte-hash check and concurrent CLI process claim | Repeat transport calls remain zero and bytes unchanged; concurrent claims yield exactly one owner and one collision | sequential and concurrent collision fixtures | `<pending independent checker>` |
+| Smoke-profile run validation | Strict validation, assignment/policy/pairing checks, read-only artifact hashes, and CLI exits | Valid scripted run/batch exits 0 with `research_eligible=false`; contradictions and tampering exit 3 | `tests/test_research_validator.py`; 6/6 PASS at `c782356...` | `<pending independent checker>` |
+| Research-profile fail-closed eligibility | The same valid smoke batch under research profile | Missing source-clean/backend/registry/model/protocol/plan/approval evidence remains explicit and exits 2, never research PASS | `test_smoke_pass_research_unverifiable_and_read_only`; process exit fixture | `<pending independent checker>` |
 
 - Gate 1 status: `PASS / FROZEN`.
 - Gate 1 frozen commit:
@@ -402,11 +473,31 @@ replacement for the still-unfilled multi-run batch manifest.
   `docs/reviews/gate2_independent_qa_20260816.md`.
 - Gate 2 verification used no GPU, real LLM, Ollama/vLLM service, external
   network request, or research run.
+- Gate 3 implementation candidate: `PASS`.
+- Gate 3 implementation commit:
+  `c782356c596443b595f6383e568eea9e97ae1250`.
+- Gate 3 specification: `docs/EIGHT_CELL_MATRIX_SPEC.md`,
+  `eight-cell-matrix-v1.0.0`, SHA-256
+  `0b1ea989c956fa6e82800fc82ef41186ad460c96e6e38ce2a82e241e41add4db`.
+- Gate 3 implementation evidence: communication-policy suite 5/5 PASS in
+  0.349 s unittest time (0.656 s wall); eight-cell runner suite 10/10 PASS in
+  5.129 s unittest time (5.457 s wall); research-validator suite 6/6 PASS in
+  4.002 s unittest time (4.247 s wall); full suite 157/157 PASS in 17.474 s
+  unittest time (17.733 s wall); `compileall`, `git diff --check`, and protected
+  Gate 1/2 path comparisons PASS.
+- Gate 3 evidence boundary: the eight-cell smoke used only temporary plans,
+  placeholder model profiles, paired test seed 1001, and a scripted CPU
+  transport. It performed no GPU, real LLM, Ollama/vLLM service, external
+  network request, model download, package installation, or research run.
+- Gate 3 independent checker: `PENDING`.
+- Gate 3 freeze: `NOT DONE`.
 - Production candidate registry: `NOT YET FROZEN`.
+- Backend/model artifacts: `NOT YET FROZEN`.
 - Readiness verdict (`NOT READY` until every required gate has evidence):
-  `NOT READY`. Gates 1 and 2 are frozen, but the production registry, experimental
-  conditions, pilot seeds, communication intervention, backend contract/smoke,
-  matrix runner, and run-start approval remain outstanding.
+  `NOT READY`. Gates 1 and 2 are frozen. Gate 3 is only an implementation
+  candidate pending independent checking and freeze; production registry,
+  production model/backend artifacts, experimental values, pilot seeds, and
+  run-start approval remain outstanding.
 - Pilot authorization: `NO`.
 - Approved run-start window: `NO`; explicit approval remains outstanding.
 
