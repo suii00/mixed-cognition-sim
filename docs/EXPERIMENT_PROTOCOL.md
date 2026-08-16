@@ -153,9 +153,11 @@ Evidence class must be one of: `direct observation`, `mechanical derivation`,
 - Phase 2 delivery boundary: sequential sender/receiver ID order using the
   Phase 1 step-start position snapshot and the unchanged communication/place
   rule; delivery starts only after all Phase 1 results commit.
-- Gate 3 matrix/edge specification: `docs/EIGHT_CELL_MATRIX_SPEC.md`,
-  `eight-cell-matrix-v1.1.1`, SHA-256
-  `96a4ddefbef7a7c9ab8d5a41cb6d438edd7a18b20c78e8154681ac9c61c44e5a`.
+- Gate 3 matrix/edge specification, Gate 4 documentation-corrected working
+  copy: `docs/EIGHT_CELL_MATRIX_SPEC.md`, `eight-cell-matrix-v1.1.1`, SHA-256
+  `fe35f3caeb0b1fc6aeb70f334bfcd05e39a7a79612cbf44e69093e02d3617e1f`.
+  The Gate 3 frozen specification bytes and hash remain recorded in section 12
+  and at tag `gate3-frozen-20260816`.
 - Effective edge policy: `agents.edge_policy` accepts exactly `full` or
   `within_bloc_only`, defaults effectively to `full`, is saved in the owned
   effective config, and contributes to the config hash. Legacy saved configs
@@ -555,11 +557,14 @@ manifest does not authorize or complete the unfrozen production analysis plan.
   zero changed trees, and guarded `requests.post` count was zero. The full
   report is retained at
   `docs/reviews/gate3_independent_recheck_20260816.md`.
-- Gate 3 known non-blocking Low: matrix specification section 28 abbreviates
-  the plan schema as `eight-cell-plan-v1.1.0`; the canonical implementation,
-  artifacts, tests, and protocol use `eight-cell-matrix-plan-v1.1.0`. The
-  documentation-only correction is deferred until after the frozen tag and
-  requires a new specification hash for Gate 4 onward.
+- Gate 3 known non-blocking Low at freeze: frozen matrix specification section
+  28 abbreviates the plan schema as `eight-cell-plan-v1.1.0`; the canonical
+  implementation, artifacts, tests, and protocol use
+  `eight-cell-matrix-plan-v1.1.0`. After creating the frozen tag, the Gate 4
+  working copy corrected that documentation-only cross-reference and now has
+  SHA-256 `fe35f3caeb0b1fc6aeb70f334bfcd05e39a7a79612cbf44e69093e02d3617e1f`.
+  The Gate 3 frozen tag retains the audited pre-erratum hash
+  `96a4ddefbef7a7c9ab8d5a41cb6d438edd7a18b20c78e8154681ac9c61c44e5a`.
 - Gate 3 evidence boundary: the eight-cell smoke used only temporary plans,
   placeholder model profiles, paired test seed 1001, and a scripted CPU
   transport. It performed no GPU, real LLM, Ollama/vLLM service, external

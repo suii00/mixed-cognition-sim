@@ -277,7 +277,7 @@ stdout, leaves stderr empty, and exits 0.
 ## 28. Batch manifest
 
 The final manifest uses schema `eight-cell-batch-manifest-v1.1.0`; this schema
-and the `eight-cell-plan-v1.1.0` schema are unchanged by specification version
+and the `eight-cell-matrix-plan-v1.1.0` schema are unchanged by specification version
 `eight-cell-matrix-v1.1.1`. Its top level
 records execution mode and the independently derived batch eligibility summary.
 It lists every planned row with execution mode, status, config identity, run
