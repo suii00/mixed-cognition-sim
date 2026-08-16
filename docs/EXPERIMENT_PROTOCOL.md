@@ -154,8 +154,8 @@ Evidence class must be one of: `direct observation`, `mechanical derivation`,
   Phase 1 step-start position snapshot and the unchanged communication/place
   rule; delivery starts only after all Phase 1 results commit.
 - Gate 3 matrix/edge specification: `docs/EIGHT_CELL_MATRIX_SPEC.md`,
-  `eight-cell-matrix-v1.0.0`, SHA-256
-  `0b1ea989c956fa6e82800fc82ef41186ad460c96e6e38ce2a82e241e41add4db`.
+  `eight-cell-matrix-v1.0.1`, SHA-256
+  `3dc9bb16823755c2b358cfe312a279f02d4c24b8e2d788e9dc1996f2a427e08b`.
 - Effective edge policy: `agents.edge_policy` accepts exactly `full` or
   `within_bloc_only`, defaults effectively to `full`, is saved in the owned
   effective config, and contributes to the config hash. Legacy saved configs
@@ -427,8 +427,8 @@ manifest does not authorize or complete the unfrozen production analysis plan.
 | Eight-cell scripted CPU smoke | 12 agents, one temporary replicate, deterministic no-network transport | 8/8 complete and strict/smoke valid; full has cross-bloc delivery; within has same-bloc and zero cross-bloc delivery | `test_eight_cell_smoke_manifest_policies_and_sequential_collision` | `<pending independent checker>` |
 | Batch manifest completeness | Successful and injected-failure batches | Every planned row, status, config/run/raw/validator evidence, and manifest pin is retained; incomplete batches never report completed | runner and research-validator targeted suites at `c782356...` | `<pending independent checker>` |
 | Batch collision/no-overwrite | Sequential byte-hash check and concurrent CLI process claim | Repeat transport calls remain zero and bytes unchanged; concurrent claims yield exactly one owner and one collision | sequential and concurrent collision fixtures | `<pending independent checker>` |
-| Smoke-profile run validation | Strict validation, assignment/policy/pairing checks, read-only artifact hashes, and CLI exits | Valid scripted run/batch exits 0 with `research_eligible=false`; contradictions and tampering exit 3 | `tests/test_research_validator.py`; 6/6 PASS at `c782356...` | `<pending independent checker>` |
-| Research-profile fail-closed eligibility | The same valid smoke batch under research profile | Missing source-clean/backend/registry/model/protocol/plan/approval evidence remains explicit and exits 2, never research PASS | `test_smoke_pass_research_unverifiable_and_read_only`; process exit fixture | `<pending independent checker>` |
+| Smoke-profile run validation | Strict validation, assignment/policy/pairing checks, read-only artifact hashes, and CLI exits | Valid scripted run/batch exits 0 with `research_eligible=false`; contradictions and tampering exit 3 | `tests/test_research_validator.py`; 9/9 PASS at `6e1d13e...` | FAIL at `255e507...`; corrected candidate recheck pending |
+| Research-profile fail-closed eligibility | Consistent scripted evidence plus batch/row/config/run mode conflicts, recomputed manifests, and persisted eligibility mutations | Consistent scripted evidence exits 2; any cross-layer execution-mode conflict exits 3; persisted assertions cannot promote eligibility; run/batch CLI classifications agree and validation is read-only | `test_smoke_pass_research_unverifiable_and_read_only`; execution-mode, manifest, eligibility, and CLI fixtures at `6e1d13e...` | FAIL at `255e507...`; corrected candidate recheck pending |
 
 - Gate 1 status: `PASS / FROZEN`.
 - Gate 1 frozen commit:
@@ -473,29 +473,38 @@ manifest does not authorize or complete the unfrozen production analysis plan.
   `docs/reviews/gate2_independent_qa_20260816.md`.
 - Gate 2 verification used no GPU, real LLM, Ollama/vLLM service, external
   network request, or research run.
-- Gate 3 implementation candidate: `PASS`.
-- Gate 3 implementation commit:
+- Gate 3 corrected implementation candidate: local regression `PASS`; independent
+  recheck `PENDING`.
+- Gate 3 original implementation commit:
   `c782356c596443b595f6383e568eea9e97ae1250`.
+- Gate 3 execution-evidence correction commit:
+  `6e1d13e3313e0bf35537db5352df61e261e8417e`.
 - Gate 3 specification: `docs/EIGHT_CELL_MATRIX_SPEC.md`,
-  `eight-cell-matrix-v1.0.0`, SHA-256
-  `0b1ea989c956fa6e82800fc82ef41186ad460c96e6e38ce2a82e241e41add4db`.
+  `eight-cell-matrix-v1.0.1`, SHA-256
+  `3dc9bb16823755c2b358cfe312a279f02d4c24b8e2d788e9dc1996f2a427e08b`.
 - Gate 3 implementation evidence: communication-policy suite 5/5 PASS in
-  0.349 s unittest time (0.656 s wall); eight-cell runner suite 10/10 PASS in
-  5.129 s unittest time (5.457 s wall); research-validator suite 6/6 PASS in
-  4.002 s unittest time (4.247 s wall); full suite 157/157 PASS in 17.474 s
-  unittest time (17.733 s wall); `compileall`, `git diff --check`, and protected
-  Gate 1/2 path comparisons PASS.
+  the combined 24-test Gate 3 run; eight-cell runner suite 10/10 PASS in the
+  same run; research-validator suite 9/9 PASS in 8.530 s unittest time
+  (9.077 s wall); combined Gate 3 suites 24/24 PASS in 15.959 s unittest time
+  (16.434 s wall); final full suite 160/160 PASS in 29.132 s unittest time
+  (29.834 s wall); `compileall`, `git diff --check`, and protected Gate 1/2 path
+  comparisons PASS.
 - Gate 3 evidence boundary: the eight-cell smoke used only temporary plans,
   placeholder model profiles, paired test seed 1001, and a scripted CPU
   transport. It performed no GPU, real LLM, Ollama/vLLM service, external
   network request, model download, package installation, or research run.
-- Gate 3 independent checker: `PENDING`.
+- Gate 3 independent checker: `FAIL` at audited candidate
+  `255e50798bef1ed2f9136c1e78a2ed8e6e7da849`. The Critical finding was that a
+  batch-only execution declaration could promote underlying `scripted_smoke`
+  runs to research PASS. That SHA is not a freeze candidate. The full report is
+  retained at `docs/reviews/gate3_independent_qa_fail_20260816.md`.
+- Gate 3 corrected-candidate independent recheck: `PENDING`.
 - Gate 3 freeze: `NOT DONE`.
 - Production candidate registry: `NOT YET FROZEN`.
 - Backend/model artifacts: `NOT YET FROZEN`.
 - Readiness verdict (`NOT READY` until every required gate has evidence):
-  `NOT READY`. Gates 1 and 2 are frozen. Gate 3 is only an implementation
-  candidate pending independent checking and freeze; production registry,
+  `NOT READY`. Gates 1 and 2 are frozen. Gate 3 has a locally passing correction
+  pending independent recheck and freeze; production registry,
   production model/backend artifacts, experimental values, pilot seeds, and
   run-start approval remain outstanding.
 - Pilot authorization: `NO`.
