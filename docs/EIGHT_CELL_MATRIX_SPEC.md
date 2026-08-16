@@ -1,6 +1,6 @@
 # Eight-Cell Matrix Specification
 
-Version: `eight-cell-matrix-v1.1.0`
+Version: `eight-cell-matrix-v1.1.1`
 
 ## 1. Scope
 
@@ -213,15 +213,24 @@ not research eligible and supplies no behavioral evidence. Missing registry,
 backend, model artifact, source-cleanliness, protocol-freeze, plan-freeze, or
 run-start-approval evidence remains explicitly unverified.
 
-Research eligibility is independently derived from authoritative evidence
-before any persisted summary is inspected. The derivation requires unanimous
-non-scripted execution-mode evidence, strict validity, clean exact source
-provenance, frozen backend evidence with an ID, a frozen production registry
-with a valid hash, complete model artifact fields, frozen protocol and matrix
-evidence, run-start approval, complete runs/batch, no invalid evidence, and no
-unverified research requirement. Batch eligibility additionally requires every
-planned run to be independently eligible. A scripted, failed, aborted,
-not-started, invalid, or unverified run therefore makes the batch ineligible.
+Research eligibility is independently derived from one validated batch context
+before any persisted summary is inspected. Both public run and batch validation
+load and bind the same plan, planned rows, generated configs, saved run configs,
+batch metadata, batch manifest, and every planned run. They apply the same
+plan/spec/base pins, source provenance, registry/backend agreement, execution-
+mode chain, per-run validity, and batch-summary checks. A public run result is
+research eligible only when both the selected run and its enclosing batch are
+independently eligible. Therefore a public run research `PASS` implies a public
+batch research `PASS` for the same artifacts.
+
+The derivation requires unanimous non-scripted execution-mode evidence, strict
+validity, clean exact source provenance, frozen backend evidence with an ID, a
+frozen production registry with a valid hash, complete model artifact fields,
+frozen protocol and matrix evidence, run-start approval, complete runs/batch,
+no invalid evidence, and no unverified research requirement. Batch eligibility
+additionally requires every planned run to be independently eligible. A
+scripted, failed, aborted, not-started, invalid, or unverified unselected run
+therefore also makes every selected public run in that batch ineligible.
 
 Persisted `research_eligible` values in planned rows, generated configs, saved
 run config snapshots, batch metadata, the batch-manifest top level, and batch-
@@ -229,9 +238,12 @@ manifest run rows are recomputable summaries only. They are never inputs that
 promote or demote the independent derivation. Each required summary is compared
 after derivation: matching values are accepted; stale `false` against derived
 `true` and unsupported `true` against derived `false` are contradictions and
-return `FAIL`/exit 3. A missing or non-Boolean summary in a canonical completed
-artifact is also invalid evidence. Missing research evidence without a
-contradiction remains `UNVERIFIABLE`/exit 2.
+return `FAIL`/exit 3. Plan declarations and completed batch metadata must also
+agree on production-registry and backend freeze state and identity. A missing or
+non-Boolean summary in a canonical completed artifact is invalid evidence. A
+stale batch-metadata or batch-manifest top-level summary blocks every public run
+as well as the batch. Consistent missing or unfrozen research evidence without a
+contradiction remains `UNVERIFIABLE`/exit 2 for both public scopes.
 
 A repository-supported synthetic `reference_ollama` fixture exercises the
 fully positive eligibility logic with structurally valid fake evidence and zero
@@ -245,10 +257,12 @@ communication-boundary, and manifest integrity and permits declared research
 evidence to be unfrozen. The `research` profile applies the same checks and also
 requires clean exact source provenance, a non-scripted backend, frozen backend
 and registry evidence, complete model artifact details, frozen protocol and
-plan, complete batch evidence, and a run-start approval reference. Persisted
+plan, complete batch evidence, and a run-start approval reference. Both public
+profiles construct the same read-only validated batch context. Persisted
 eligibility summaries are checked against the same independently recomputed
 evidence under both profiles, while only a successful research-profile result
-exposes `research_eligible=true` in validator output.
+exposes `research_eligible=true` in validator output. Run output separately
+reports selected-run eligibility, batch eligibility, and their conjunction.
 
 ## 27. Validator exit codes
 
@@ -262,7 +276,9 @@ stdout, leaves stderr empty, and exits 0.
 
 ## 28. Batch manifest
 
-The final manifest uses schema `eight-cell-batch-manifest-v1.1.0`. Its top level
+The final manifest uses schema `eight-cell-batch-manifest-v1.1.0`; this schema
+and the `eight-cell-plan-v1.1.0` schema are unchanged by specification version
+`eight-cell-matrix-v1.1.1`. Its top level
 records execution mode and the independently derived batch eligibility summary.
 It lists every planned row with execution mode, status, config identity, run
 directory, run-meta manifest, raw manifest, strict result, original strict

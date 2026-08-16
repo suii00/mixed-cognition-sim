@@ -27,7 +27,7 @@ from engine.provenance import (
 
 
 PLAN_SCHEMA_VERSION = "eight-cell-matrix-plan-v1.1.0"
-MATRIX_SPEC_VERSION = "eight-cell-matrix-v1.1.0"
+MATRIX_SPEC_VERSION = "eight-cell-matrix-v1.1.1"
 PLAN_MANIFEST_VERSION = "eight-cell-plan-manifest-v1.0.0"
 BATCH_MANIFEST_VERSION = "eight-cell-batch-manifest-v1.1.0"
 METRIC_VERSION = "metric-v2.0.0"

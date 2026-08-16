@@ -283,9 +283,9 @@ def run_smoke_batch(
                 simulation.run()
                 run_dir = Path(simulation.output_dir)
                 strict = validate_run(run_dir, strict=True)
-                from tools.research_validator import validate_run_profile
+                from tools.research_validator import _validate_run_evidence
 
-                smoke = validate_run_profile(
+                smoke = _validate_run_evidence(
                     run_dir,
                     batch_dir,
                     dict(planned),

@@ -291,7 +291,7 @@ class EightCellRunnerTests(unittest.TestCase):
             "eight-cell-batch-manifest-v1.1.0",
         )
         self.assertEqual(
-            manifest["matrix_spec_version"], "eight-cell-matrix-v1.1.0"
+            manifest["matrix_spec_version"], "eight-cell-matrix-v1.1.1"
         )
         self.assertEqual(plan["execution_mode"], "scripted_smoke")
         self.assertEqual(meta["execution_mode"], "scripted_smoke")

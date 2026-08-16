@@ -133,6 +133,24 @@ class ValidationResult:
         }
 
 
+@dataclass
+class ValidatedBatchContext:
+    """One canonical authority context shared by public batch and run reports."""
+
+    batch_path: Path
+    profile: str
+    batch_result: ValidationResult
+    plan: Optional[Dict[str, Any]] = None
+    planned_rows: List[Dict[str, Any]] = field(default_factory=list)
+    rows_by_run: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    configs_by_run: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    batch_meta: Optional[Dict[str, Any]] = None
+    batch_manifest: Optional[Dict[str, Any]] = None
+    manifest_rows_by_run: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    run_metas_by_run: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    run_results: Dict[str, ValidationResult] = field(default_factory=dict)
+
+
 def _error(result: ValidationResult, message: str) -> None:
     if message not in result.errors:
         result.errors.append(message)
@@ -697,7 +715,7 @@ def _load_run_manifest_evidence(
     return batch_manifest, manifest_row
 
 
-def validate_run_profile(
+def _validate_run_evidence(
     run_dir: Path | str,
     batch_dir: Path | str,
     row: Dict[str, Any],
@@ -705,6 +723,7 @@ def validate_run_profile(
     *,
     _compare_persisted_summary: bool = True,
 ) -> ValidationResult:
+    """Validate one run inside an already identified batch evidence package."""
     if profile not in {"smoke", "research"}:
         raise InvocationError("profile must be smoke or research")
     run_path = Path(run_dir).resolve()
@@ -785,17 +804,18 @@ def validate_run_profile(
     return result
 
 
-def validate_batch_profile(
+def _build_validated_batch_context(
     batch_dir: Path | str,
     profile: str,
-) -> ValidationResult:
+) -> ValidatedBatchContext:
     if profile not in {"smoke", "research"}:
         raise InvocationError("profile must be smoke or research")
     batch_path = Path(batch_dir).resolve()
     result = ValidationResult(str(batch_path), profile)
+    context = ValidatedBatchContext(batch_path, profile, result)
     if not batch_path.is_dir() or batch_path.is_symlink():
         _error(result, "batch directory is missing or is a symlink")
-        return result
+        return context
     meta = _read_object(batch_path / "batch_meta.json", result)
     plan = _read_object(batch_path / "plan.json", result)
     plan_manifest = _read_object(batch_path / "plan_manifest.json", result)
@@ -805,8 +825,17 @@ def validate_batch_profile(
     except (OSError, PlanValidationError) as error:
         _error(result, f"invalid planned_runs.jsonl: {error}")
         rows = []
+    context.batch_meta = meta
+    context.plan = plan
+    context.planned_rows = rows
+    context.rows_by_run = {
+        row["run_id"]: row
+        for row in rows
+        if isinstance(row, dict) and isinstance(row.get("run_id"), str)
+    }
+    context.batch_manifest = batch_manifest
     if any(value is None for value in (meta, plan, plan_manifest, batch_manifest)):
-        return result
+        return context
     assert meta is not None and plan is not None
     assert plan_manifest is not None and batch_manifest is not None
     try:
@@ -877,6 +906,7 @@ def validate_batch_profile(
         configs.append(config)
         if config_path.read_bytes() != canonical_json_bytes(config) + b"\n":
             _error(result, f"generated config is not canonical: {run_id}")
+    context.configs_by_run = dict(config_by_run)
     if (batch_path / "plan.json").read_bytes() != canonical_json_bytes(plan) + b"\n":
         _error(result, "plan.json is not canonical")
     if (batch_path / "planned_runs.jsonl").read_bytes() != planned_rows_bytes(rows):
@@ -926,6 +956,7 @@ def validate_batch_profile(
     }
     if len(manifest_by_run) != len(manifest_rows):
         _error(result, "batch manifest contains duplicate or invalid run rows")
+    context.manifest_rows_by_run = dict(manifest_by_run)
     for ordinal, manifest_row in enumerate(manifest_rows):
         if not isinstance(manifest_row, dict) or set(manifest_row) != MANIFEST_ROW_FIELDS:
             _error(result, f"batch manifest run row {ordinal} fields are not canonical")
@@ -1005,6 +1036,8 @@ def validate_batch_profile(
                 _error(result, message)
             if run_meta is not None:
                 run_metas.append(run_meta)
+                if isinstance(run_id, str):
+                    context.run_metas_by_run[run_id] = run_meta
                 if not _manifest_equal(
                     run_dir / "run_meta.json",
                     manifest_row.get("run_meta_manifest"),
@@ -1020,14 +1053,15 @@ def validate_batch_profile(
                 _error(result, f"stored strict validator evidence mismatch for {run_id}")
             if manifest_row.get("smoke_valid") is not True:
                 _error(result, f"completed run {run_id} lacks smoke PASS")
-            smoke_result = validate_run_profile(
+            smoke_result = _validate_run_evidence(
                 run_dir,
                 batch_path,
                 row,
-                "smoke",
+                profile,
                 _compare_persisted_summary=False,
             )
             if isinstance(run_id, str):
+                context.run_results[run_id] = smoke_result
                 run_eligibilities[run_id] = (
                     smoke_result.derived_research_eligible
                 )
@@ -1048,6 +1082,19 @@ def validate_batch_profile(
                 _error(result, f"stored smoke eligibility evidence mismatch for {run_id}")
         else:
             config = config_by_run.get(run_id)
+            if isinstance(run_id, str):
+                incomplete_result = ValidationResult(str(run_dir), profile)
+                _error(
+                    incomplete_result,
+                    f"run {run_id} is not completed: {status}",
+                )
+                incomplete_result.details.update({
+                    "run_id": run_id,
+                    "execution_mode": row.get("execution_mode"),
+                    "lifecycle_status": status,
+                    "derived_research_eligible": False,
+                })
+                context.run_results[run_id] = incomplete_result
             evidence: List[Tuple[str, Any]] = [
                 (
                     f"planned row {run_id}",
@@ -1139,6 +1186,149 @@ def validate_batch_profile(
         "planned_runs": len(rows),
         "completed_runs": counts["completed_runs"],
         "execution_mode": execution_mode,
+    })
+    return context
+
+
+def validate_batch_profile(
+    batch_dir: Path | str,
+    profile: str,
+) -> ValidationResult:
+    """Produce the public batch report from the shared authority context."""
+    return _build_validated_batch_context(batch_dir, profile).batch_result
+
+
+def _effective_research_eligibility(result: ValidationResult) -> bool:
+    return (
+        result.derived_research_eligible
+        and not result.errors
+        and not result.unverified_research_requirements
+    )
+
+
+def _merge_findings(
+    destination: ValidationResult,
+    source: ValidationResult,
+) -> None:
+    for message in source.errors:
+        _error(destination, message)
+    for message in source.unverified_research_requirements:
+        _unverified(destination, message)
+    destination.strict_unverifiable.extend(source.strict_unverifiable)
+
+
+def validate_run_profile(
+    run_dir: Path | str,
+    batch_dir: Path | str,
+    row: Dict[str, Any],
+    profile: str,
+) -> ValidationResult:
+    """Produce a public run report that is bounded by its batch authority."""
+    if profile not in {"smoke", "research"}:
+        raise InvocationError("profile must be smoke or research")
+    run_path = Path(run_dir).resolve()
+    context = _build_validated_batch_context(batch_dir, profile)
+    result = ValidationResult(str(run_path), profile)
+    run_id = row.get("run_id")
+    canonical_row = (
+        context.rows_by_run.get(run_id)
+        if isinstance(run_id, str)
+        else None
+    )
+    selected = (
+        context.run_results.get(run_id)
+        if isinstance(run_id, str)
+        else None
+    )
+
+    _merge_findings(result, context.batch_result)
+    if canonical_row is None:
+        _error(result, "selected run is absent from canonical planned rows")
+    elif canonical_row != row:
+        _error(result, "selected run row differs from canonical planned evidence")
+    expected_path = (
+        context.batch_path / "runs" / f"output_{run_id}"
+        if isinstance(run_id, str)
+        else None
+    )
+    if expected_path is None or run_path != expected_path.resolve():
+        _error(result, "selected run directory differs from canonical batch path")
+    if selected is None:
+        _error(result, "selected run has no validated evidence result")
+        selected_raw_eligible = False
+        selected_effective_eligible = False
+        selected_details: Dict[str, Any] = {}
+    else:
+        _merge_findings(result, selected)
+        selected_raw_eligible = selected.derived_research_eligible
+        selected_effective_eligible = _effective_research_eligibility(selected)
+        selected_details = copy.deepcopy(selected.details)
+
+    batch_raw_eligible = context.batch_result.derived_research_eligible
+    batch_effective_eligible = _effective_research_eligibility(
+        context.batch_result
+    )
+    result.derived_research_eligible = (
+        selected_raw_eligible and batch_raw_eligible
+    )
+    selected_config = (
+        context.configs_by_run.get(run_id)
+        if isinstance(run_id, str)
+        else None
+    )
+    selected_run_meta = (
+        context.run_metas_by_run.get(run_id)
+        if isinstance(run_id, str)
+        else None
+    )
+    selected_manifest_row = (
+        context.manifest_rows_by_run.get(run_id)
+        if isinstance(run_id, str)
+        else None
+    )
+    persisted_summaries = {
+        "batch_metadata": (
+            context.batch_meta.get("research_eligible")
+            if isinstance(context.batch_meta, dict)
+            else None
+        ),
+        "batch_manifest": (
+            context.batch_manifest.get("research_eligible")
+            if isinstance(context.batch_manifest, dict)
+            else None
+        ),
+        "selected_planned_row": (
+            canonical_row.get("research_eligible")
+            if isinstance(canonical_row, dict)
+            else None
+        ),
+        "selected_generated_config": _simulation_value(
+            selected_config, "research_eligible"
+        ),
+        "selected_saved_run_config": (
+            _run_snapshot_simulation_value(
+                selected_run_meta, "research_eligible"
+            )
+            if isinstance(selected_run_meta, dict)
+            else None
+        ),
+        "selected_manifest_run": (
+            selected_manifest_row.get("research_eligible")
+            if isinstance(selected_manifest_row, dict)
+            else None
+        ),
+    }
+    result.strict_unverifiable = list(dict.fromkeys(result.strict_unverifiable))
+    result.details.update(selected_details)
+    result.details.update({
+        "run_id": run_id,
+        "execution_mode": context.batch_result.details.get("execution_mode"),
+        "derived_selected_run_research_eligible": selected_raw_eligible,
+        "derived_batch_research_eligible": batch_raw_eligible,
+        "selected_run_research_eligible": selected_effective_eligible,
+        "batch_research_eligible": batch_effective_eligible,
+        "persisted_research_eligibility": persisted_summaries,
+        "derived_research_eligible": result.derived_research_eligible,
     })
     return result
 
