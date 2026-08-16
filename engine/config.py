@@ -11,6 +11,8 @@ from engine.provenance import (
 
 
 DEFAULT_MAX_CONCURRENCY = 1
+DEFAULT_EDGE_POLICY = "full"
+EDGE_POLICIES = frozenset({"full", "within_bloc_only"})
 
 
 def build_effective_config(config: Dict[str, Any]) -> Dict[str, Any]:
@@ -32,6 +34,17 @@ def build_effective_config(config: Dict[str, Any]) -> Dict[str, Any]:
     ):
         raise ValueError("llm_defaults.max_concurrency must be a positive integer")
     llm_defaults["max_concurrency"] = max_concurrency
+
+    agents = effective.get("agents")
+    if not isinstance(agents, dict):
+        raise ValueError("agents must be a mapping")
+    edge_policy = agents.get("edge_policy", DEFAULT_EDGE_POLICY)
+    if not isinstance(edge_policy, str) or edge_policy not in EDGE_POLICIES:
+        raise ValueError(
+            "agents.edge_policy must be one of: "
+            + ", ".join(sorted(EDGE_POLICIES))
+        )
+    agents["edge_policy"] = edge_policy
     return effective
 
 

@@ -1042,6 +1042,9 @@ def _check_messages(
             try:
                 world = World(simulation["half_space_size"], places)
                 communication_radius = agents_config["communication_radius"]
+                edge_policy = agents_config.get("edge_policy", "full")
+                if edge_policy not in {"full", "within_bloc_only"}:
+                    raise ValueError("invalid agents.edge_policy")
                 reconstructed: Dict[Tuple[int, int], List[int]] = {}
                 for step in range(1, expected_steps + 1):
                     for sender_id in range(expected_agents):
@@ -1055,6 +1058,12 @@ def _check_messages(
                         receiver_ids = []
                         for receiver_id in range(expected_agents):
                             if receiver_id == sender_id:
+                                continue
+                            if (
+                                edge_policy == "within_bloc_only"
+                                and labels.get(sender_id, (None, None))[0]
+                                != labels.get(receiver_id, (None, None))[0]
+                            ):
                                 continue
                             receiver_position = positions_by_key[
                                 (step, receiver_id)

@@ -42,6 +42,7 @@ class Simulation:
 
         agent_cfg = self.config["agents"]
         self.communication_radius = agent_cfg["communication_radius"]
+        self.edge_policy = agent_cfg["edge_policy"]
         self.memory_limit = agent_cfg["memory_limit"]
         self.memory_size = agent_cfg["memory_size"]
         self.message_history_limit = agent_cfg["message_history_limit"]
@@ -142,6 +143,8 @@ class Simulation:
         )
 
     def _can_communicate(self, a1: Agent, a2: Agent) -> bool:
+        if self.edge_policy == "within_bloc_only" and a1.bloc != a2.bloc:
+            return False
         return self._can_communicate_positions(a1.position, a2.position)
 
     def _capture_phase_snapshot(self) -> Dict[str, Any]:
@@ -381,6 +384,11 @@ class Simulation:
             receiver_ids = []
             for receiver in ordered_agents:
                 if receiver.agent_id == sender.agent_id:
+                    continue
+                if (
+                    self.edge_policy == "within_bloc_only"
+                    and receiver.bloc != sender.bloc
+                ):
                     continue
                 if self._can_communicate_positions(
                     step_positions[sender.agent_id],
