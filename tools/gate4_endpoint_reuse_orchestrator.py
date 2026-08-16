@@ -326,6 +326,276 @@ class Transcript:
                 self._handle.close()
 
 
+@dataclass(frozen=True)
+class GenerationReservation:
+    ordinal: int
+    phase: str
+    role: str
+
+
+class ApprovalExecutionGate:
+    """Workload-local gate for actual ``backend.generate`` invocations.
+
+    Gate 2 still submits and settles the whole phase.  This gate is the final,
+    thread-safe boundary immediately in front of the approved backend call, so
+    queued workers can settle after a failure without starting more
+    generations.
+    """
+
+    def __init__(
+        self,
+        *,
+        maximum_generation_calls: int,
+        deadline_monotonic: float,
+        transcript: Transcript,
+        monotonic_fn: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self.maximum_generation_calls = maximum_generation_calls
+        self.deadline_monotonic = deadline_monotonic
+        self.started_generation_calls = 0
+        self.completed_generation_calls = 0
+        self.terminal_stop_reason: Optional[str] = None
+        self.next_expected_phase_role: Optional[tuple[str, str]] = (
+            EXPECTED_PHASE_ROLE_ORDER[0]
+        )
+        self._lock = threading.Lock()
+        self._active: Optional[GenerationReservation] = None
+        self._completed_phase_roles: list[tuple[str, str]] = []
+        self._suppressed: list[Dict[str, Any]] = []
+        self._phase3_transition_started = False
+        self._phase3_ready = False
+        self._transcript = transcript
+        self._monotonic = monotonic_fn
+
+    def _latch_locked(self, reason: str) -> bool:
+        if self.terminal_stop_reason is not None:
+            return False
+        self.terminal_stop_reason = reason
+        return True
+
+    def _record_terminal(self, reason: str, newly_latched: bool) -> None:
+        if newly_latched:
+            self._transcript.event(
+                "generation_terminal_latched",
+                {"reason": reason},
+            )
+
+    def _reject_locked(
+        self,
+        *,
+        phase: str,
+        role: str,
+        request_id: str,
+        reason: str,
+    ) -> tuple[Dict[str, Any], bool]:
+        newly_latched = self._latch_locked(reason)
+        detail = {
+            "phase": phase,
+            "role": role,
+            "request_id": request_id,
+            "reason": self.terminal_stop_reason,
+            "started_generation_calls": self.started_generation_calls,
+            "completed_generation_calls": self.completed_generation_calls,
+        }
+        self._suppressed.append(copy.deepcopy(detail))
+        return detail, newly_latched
+
+    def _raise_suppressed(
+        self,
+        detail: Mapping[str, Any],
+        newly_latched: bool,
+    ) -> None:
+        reason = str(detail["reason"])
+        self._record_terminal(reason, newly_latched)
+        self._transcript.event("generation_suppressed", detail)
+        raise EndpointReuseExecutionError(f"generation suppressed before backend: {reason}")
+
+    def latch_terminal(self, reason: str) -> None:
+        with self._lock:
+            newly_latched = self._latch_locked(reason)
+        self._record_terminal(reason, newly_latched)
+
+    def reserve(
+        self,
+        *,
+        phase: str,
+        role: str,
+        request_id: str,
+    ) -> GenerationReservation:
+        with self._lock:
+            reason: Optional[str] = None
+            if self.terminal_stop_reason is not None:
+                reason = self.terminal_stop_reason
+            elif self._monotonic() > self.deadline_monotonic:
+                reason = "approved_wall_time_expired"
+            elif self._active is not None:
+                reason = "parallel_generation_started"
+            elif phase == "phase3" and not self._phase3_ready:
+                reason = "phase3_unload_not_verified"
+            elif self.next_expected_phase_role != (phase, role):
+                reason = "invalid_phase_role_sequence"
+            elif self.started_generation_calls >= self.maximum_generation_calls:
+                reason = "generation_budget_exhausted"
+            if reason is not None:
+                detail, newly_latched = self._reject_locked(
+                    phase=phase,
+                    role=role,
+                    request_id=request_id,
+                    reason=reason,
+                )
+            else:
+                ordinal = self.started_generation_calls + 1
+                reservation = GenerationReservation(ordinal, phase, role)
+                self.started_generation_calls = ordinal
+                self._active = reservation
+                detail = None
+                newly_latched = False
+        if detail is not None:
+            self._raise_suppressed(detail, newly_latched)
+        return reservation
+
+    def complete(self, reservation: GenerationReservation) -> None:
+        with self._lock:
+            if self._active != reservation:
+                newly_latched = self._latch_locked(
+                    "generation_reservation_completion_mismatch"
+                )
+                reason = self.terminal_stop_reason
+            else:
+                self._active = None
+                self.completed_generation_calls += 1
+                self._completed_phase_roles.append(
+                    (reservation.phase, reservation.role)
+                )
+                next_index = self.completed_generation_calls
+                self.next_expected_phase_role = (
+                    EXPECTED_PHASE_ROLE_ORDER[next_index]
+                    if next_index < len(EXPECTED_PHASE_ROLE_ORDER)
+                    else None
+                )
+                newly_latched = False
+                reason = None
+        if reason is not None:
+            self._record_terminal(reason, newly_latched)
+            raise EndpointReuseExecutionError(reason)
+        self._transcript.event(
+            "generation_completed",
+            {
+                "ordinal": reservation.ordinal,
+                "phase": reservation.phase,
+                "role": reservation.role,
+            },
+        )
+
+    def fail(self, reservation: GenerationReservation, error: BaseException) -> None:
+        if isinstance(error, (TimeoutError, requests.Timeout)):
+            reason = f"generation_timeout:{type(error).__name__}"
+        elif isinstance(error, EndpointReuseExecutionError):
+            reason = f"generation_contract_failure:{type(error).__name__}"
+        else:
+            reason = f"backend_exception:{type(error).__name__}"
+        with self._lock:
+            if self._active == reservation:
+                self._active = None
+            newly_latched = self._latch_locked(reason)
+            observed_reason = self.terminal_stop_reason
+        self._record_terminal(str(observed_reason), newly_latched)
+
+    def begin_phase3_unload(
+        self,
+        *,
+        phase: str,
+        role: str,
+        request_id: str,
+        transcript_state: str,
+    ) -> None:
+        with self._lock:
+            reason: Optional[str] = None
+            if self.terminal_stop_reason is not None:
+                reason = self.terminal_stop_reason
+            elif self._monotonic() > self.deadline_monotonic:
+                reason = "approved_wall_time_expired"
+            elif phase != "phase3" or role != ROLE_ORDER[0]:
+                reason = "invalid_phase3_transition_request"
+            elif transcript_state != "initial_generation_passed":
+                reason = "phase1_state_not_complete"
+            elif self.started_generation_calls != 3:
+                reason = "phase1_generation_start_count_mismatch"
+            elif self.completed_generation_calls != 3:
+                reason = "phase1_generation_completion_count_mismatch"
+            elif self._completed_phase_roles != list(EXPECTED_PHASE_ROLE_ORDER[:3]):
+                reason = "phase1_completed_roles_mismatch"
+            elif self._phase3_transition_started or self._phase3_ready:
+                reason = "phase3_transition_repeated"
+            elif self.maximum_generation_calls - self.started_generation_calls < 3:
+                reason = "insufficient_generation_budget_for_phase3"
+            if reason is not None:
+                detail, newly_latched = self._reject_locked(
+                    phase=phase,
+                    role=role,
+                    request_id=request_id,
+                    reason=reason,
+                )
+            else:
+                self._phase3_transition_started = True
+                detail = None
+                newly_latched = False
+        if detail is not None:
+            self._raise_suppressed(detail, newly_latched)
+
+    def finish_phase3_unload(self) -> None:
+        with self._lock:
+            if not self._phase3_transition_started or self.terminal_stop_reason:
+                newly_latched = self._latch_locked(
+                    "phase3_unload_transition_mismatch"
+                )
+                reason = self.terminal_stop_reason
+            else:
+                self._phase3_transition_started = False
+                self._phase3_ready = True
+                newly_latched = False
+                reason = None
+        if reason is not None:
+            self._record_terminal(str(reason), newly_latched)
+            raise EndpointReuseExecutionError(str(reason))
+
+    def require_deadline(self) -> None:
+        with self._lock:
+            if self.terminal_stop_reason is not None:
+                reason = self.terminal_stop_reason
+                newly_latched = False
+            elif self._monotonic() > self.deadline_monotonic:
+                reason = "approved_wall_time_expired"
+                newly_latched = self._latch_locked(reason)
+            else:
+                return
+        self._record_terminal(str(reason), newly_latched)
+        raise EndpointReuseExecutionError(str(reason))
+
+    def snapshot(self) -> Dict[str, Any]:
+        with self._lock:
+            next_expected = (
+                {
+                    "phase": self.next_expected_phase_role[0],
+                    "role": self.next_expected_phase_role[1],
+                }
+                if self.next_expected_phase_role is not None
+                else None
+            )
+            return {
+                "maximum_generation_calls": self.maximum_generation_calls,
+                "started_generation_calls": self.started_generation_calls,
+                "completed_generation_calls": self.completed_generation_calls,
+                "terminal_stop_reason": self.terminal_stop_reason,
+                "next_expected_phase_role": next_expected,
+                "completed_phase_roles": [
+                    {"phase": phase, "role": role}
+                    for phase, role in self._completed_phase_roles
+                ],
+                "suppressed_requests": copy.deepcopy(self._suppressed),
+            }
+
+
 def _build_config(
     approval: Mapping[str, Any],
     preflight: Mapping[str, Any],
@@ -395,6 +665,7 @@ class ReuseTransport:
         servers: Sequence[Mapping[str, Any]],
         transcript: Transcript,
         deadline_monotonic: float,
+        monotonic_fn: Callable[[], float] = time.monotonic,
     ) -> None:
         self.approval = approval
         self.backend = backend
@@ -410,54 +681,67 @@ class ReuseTransport:
         self.unloads: list[Dict[str, Any]] = []
         self._lock = threading.Lock()
         self._phase3_prepared = False
-        self._deadline_monotonic = deadline_monotonic
+        self.execution_gate = ApprovalExecutionGate(
+            maximum_generation_calls=approval["maximum_generation_calls"],
+            deadline_monotonic=deadline_monotonic,
+            transcript=transcript,
+            monotonic_fn=monotonic_fn,
+        )
 
-    def _check_deadline(self) -> None:
-        if time.monotonic() > self._deadline_monotonic:
-            raise EndpointReuseExecutionError("approved wall-time ceiling exceeded")
-
-    def _prepare_phase3(self) -> None:
+    def _prepare_phase3(self, request, role: str) -> None:
         if self._phase3_prepared:
             return
-        for endpoint in self.approval["endpoints"]:
-            self._check_deadline()
-            role = endpoint["model_role"]
-            unload = self.backend.unload(
-                self.approval,
-                endpoint,
-                self.server_by_role[role],
-                "between_phases",
+        self.execution_gate.begin_phase3_unload(
+            phase=request.phase,
+            role=role,
+            request_id=request.request_id,
+            transcript_state=self.transcript.state,
+        )
+        try:
+            for endpoint in self.approval["endpoints"]:
+                self.execution_gate.require_deadline()
+                endpoint_role = endpoint["model_role"]
+                unload = self.backend.unload(
+                    self.approval,
+                    endpoint,
+                    self.server_by_role[endpoint_role],
+                    "between_phases",
+                )
+                self.unloads.append(copy.deepcopy(unload))
+            self.transcript.enter("models_unloaded", {"count": len(self.unloads)})
+            if any(
+                unload
+                != {
+                    "role": endpoint["model_role"],
+                    "port": endpoint["port"],
+                    "model_tag": endpoint["model_tag"],
+                    "status_code": 200,
+                    "done": True,
+                    "done_reason": "unload",
+                    "ps_models_after": [],
+                }
+                for endpoint, unload in zip(self.approval["endpoints"], self.unloads)
+            ):
+                raise EndpointReuseExecutionError("between-phase unload is incomplete")
+            self.transcript.enter("unload_verified", {"endpoints": list(ROLE_ORDER)})
+            self.execution_gate.finish_phase3_unload()
+            self._phase3_prepared = True
+        except Exception as error:
+            self.execution_gate.latch_terminal(
+                f"phase3_unload_failure:{type(error).__name__}"
             )
-            self.unloads.append(copy.deepcopy(unload))
-        self.transcript.enter("models_unloaded", {"count": len(self.unloads)})
-        if any(
-            unload
-            != {
-                "role": endpoint["model_role"],
-                "port": endpoint["port"],
-                "model_tag": endpoint["model_tag"],
-                "status_code": 200,
-                "done": True,
-                "done_reason": "unload",
-                "ps_models_after": [],
-            }
-            for endpoint, unload in zip(self.approval["endpoints"], self.unloads)
-        ):
-            raise EndpointReuseExecutionError("between-phase unload is incomplete")
-        self.transcript.enter("unload_verified", {"endpoints": list(ROLE_ORDER)})
-        self._phase3_prepared = True
+            raise
 
     def __call__(self, request, telemetry):
-        self._check_deadline()
         endpoint = self.endpoint_by_model.get(request.model)
         if endpoint is None:
+            self.execution_gate.latch_terminal("request_model_not_approved")
             raise EndpointReuseExecutionError("request model is not approved")
         role = endpoint["model_role"]
         server = self.server_by_role[role]
         with self._lock:
             if request.phase == "phase3":
-                self._prepare_phase3()
-            ordinal = len(self.records) + 1
+                self._prepare_phase3(request, role)
         payload = build_ollama_chat_payload(
             prompt=request.prompt,
             model=request.model,
@@ -466,6 +750,12 @@ class ReuseTransport:
             llm_overrides=copy.deepcopy(request.llm_overrides),
             keep_alive=-1,
         )
+        reservation = self.execution_gate.reserve(
+            phase=request.phase,
+            role=role,
+            request_id=request.request_id,
+        )
+        ordinal = reservation.ordinal
         started = time.monotonic_ns()
         result: Dict[str, Any]
         try:
@@ -475,7 +765,6 @@ class ReuseTransport:
                 server,
                 payload,
             )
-            self._check_deadline()
             observed_telemetry = result.get(
                 "telemetry",
                 {
@@ -530,7 +819,6 @@ class ReuseTransport:
                 server,
                 request.phase,
             )
-            self._check_deadline()
             record = {
                 "ordinal": ordinal,
                 "phase": request.phase,
@@ -566,6 +854,7 @@ class ReuseTransport:
                     self.transcript.enter(
                         "reload_generation_passed", {"generation_calls": 6}
                     )
+            self.execution_gate.complete(reservation)
             return result["parsed"], result["raw_output"]
         except Exception as error:
             if not any(
@@ -598,6 +887,7 @@ class ReuseTransport:
                 for attempt in self.attempts
             ):
                 telemetry("transport_failure", 1)
+            self.execution_gate.fail(reservation, error)
             raise
 
 
@@ -660,6 +950,7 @@ def run_approved_endpoint_reuse(
     backend: Optional[EndpointBackend] = None,
     source_probe: Callable[[Path], SourceState] = _source_state,
     sleep_fn: Callable[[float], None] = time.sleep,
+    monotonic_fn: Callable[[], float] = time.monotonic,
 ) -> OrchestrationReceipt:
     repo = (repository or Path(__file__).resolve().parents[1]).resolve()
     approval, approval_bytes, observed_approval_sha = load_approval(
@@ -701,11 +992,15 @@ def run_approved_endpoint_reuse(
         publisher_approval_projection(approval),
     )
     started_utc = utc_now_iso()
-    started_monotonic = time.monotonic()
+    started_monotonic = monotonic_fn()
     deadline_monotonic = started_monotonic + approval["maximum_wall_seconds"]
 
     def check_deadline() -> None:
-        if time.monotonic() > deadline_monotonic:
+        if monotonic_fn() > deadline_monotonic:
+            if transport is not None:
+                transport.execution_gate.latch_terminal(
+                    "approved_wall_time_expired"
+                )
             raise EndpointReuseExecutionError("approved wall-time ceiling exceeded")
     _write_json(
         attempt / CAPTURE_START_FILENAME,
@@ -755,6 +1050,7 @@ def run_approved_endpoint_reuse(
             servers,
             transcript,
             deadline_monotonic,
+            monotonic_fn=monotonic_fn,
         )
         runs_root = attempt / "runs"
         runs_root.mkdir(mode=0o755, exist_ok=False)
@@ -818,6 +1114,22 @@ def run_approved_endpoint_reuse(
     generations = transport.records if transport is not None else []
     generation_attempts = transport.attempts if transport is not None else []
     unloads = transport.unloads if transport is not None else []
+    execution_gate = (
+        transport.execution_gate.snapshot()
+        if transport is not None
+        else {
+            "maximum_generation_calls": approval["maximum_generation_calls"],
+            "started_generation_calls": 0,
+            "completed_generation_calls": 0,
+            "terminal_stop_reason": failure_kind,
+            "next_expected_phase_role": {
+                "phase": EXPECTED_PHASE_ROLE_ORDER[0][0],
+                "role": EXPECTED_PHASE_ROLE_ORDER[0][1],
+            },
+            "completed_phase_roles": [],
+            "suppressed_requests": [],
+        }
+    )
     observations = {
         "schema_version": OBSERVATION_SCHEMA_VERSION,
         "approval_sha256": observed_approval_sha,
@@ -829,6 +1141,7 @@ def run_approved_endpoint_reuse(
         "stability_snapshots": stability_snapshots,
         "warnings": active_backend.warnings(),
         "cleanup": cleanup,
+        "execution_gate": execution_gate,
     }
     _write_json(attempt / OBSERVATIONS_FILENAME, observations)
     status = "aborted" if interrupted else (
@@ -844,8 +1157,12 @@ def run_approved_endpoint_reuse(
         "failure_reasons": list(dict.fromkeys(failure_reasons)),
         "started_utc": started_utc,
         "ended_utc": utc_now_iso(),
-        "elapsed_seconds": time.monotonic() - started_monotonic,
-        "generation_calls": len(generations),
+        "elapsed_seconds": monotonic_fn() - started_monotonic,
+        "generation_calls": execution_gate["started_generation_calls"],
+        "completed_generation_calls": execution_gate[
+            "completed_generation_calls"
+        ],
+        "terminal_stop_reason": execution_gate["terminal_stop_reason"],
         "administrative_unloads": len(unloads)
         + len(cleanup.get("final_unloads", [])),
         "cleanup_passed": cleanup.get("passed") is True,

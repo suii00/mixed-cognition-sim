@@ -1,6 +1,6 @@
 # Gate 4 Ollama Endpoint-Reuse Specification
 
-Version: `gate4-ollama-endpoint-reuse-v1.0.0`
+Version: `gate4-ollama-endpoint-reuse-v1.1.0`
 
 Status: `CPU IMPLEMENTED CANDIDATE — REAL WORKLOAD NOT EXECUTED — NO EXECUTION APPROVAL`
 
@@ -198,7 +198,44 @@ final administrative unload and cleanup
 
 Unload calls, API probes, process probes, and cleanup operations are counted
 separately and never as generation calls. There is no preload generation and
-no generation retry. The transport submits at most one request at a time.
+no generation retry. Gate 2 may submit the complete phase for settlement, but
+the workload config permits only one in-flight transport worker and a separate
+approval execution gate controls every actual backend generation.
+
+The approval-bound generation count is the number of actual
+`backend.generate(...)` invocations. It is not the number of submitted
+Simulation requests, successful response records, HTTP attempts, retries, or
+administrative unloads. Immediately before the backend call, the thread-safe
+gate atomically rejects an existing terminal stop, an expired wall deadline,
+the wrong next phase/role, an already-active generation, or an exhausted
+six-call budget, and then reserves one ordinal. The only successful sequence
+is:
+
+```text
+phase1:qwen
+phase1:llama
+phase1:gemma
+phase3:qwen
+phase3:llama
+phase3:gemma
+```
+
+The first timeout, transport/backend exception, contract failure, deadline,
+budget failure, or invalid sequence latches a one-way terminal reason before
+the error leaves the transport. Already queued workers still settle under the
+frozen Gate 2 rule, but they record `generation_suppressed` in the transcript
+and cannot call the backend. A successful workload has exactly six started
+and six completed generations; a failed workload may have fewer but never
+more than six actual backend invocations.
+
+Before the first Phase 3 request can unload anything, the same gate atomically
+requires: no terminal stop, transcript state `initial_generation_passed`,
+exactly three started and three successfully completed Phase 1 generations in
+Qwen/Llama/Gemma order, no Phase 3 start, at least three remaining call slots,
+and a live wall deadline. A failed precondition leaves both the between-phase
+unload count and the Phase 3 generation count unchanged. Only after those
+checks may the three administrative unloads start; all three unload responses
+must then be verified before Phase 3 reservation is enabled.
 
 ## 6. Required state and evidence
 
@@ -231,6 +268,13 @@ result, and workload-validation report. Every owned JSON file is canonical and
 every artifact is written exclusively. Failed, aborted, cleanup-failed,
 publication-failed, and verification-failed outcomes remain bound to their
 unique attempt/receipt paths.
+
+The observations and terminal result also retain the execution-gate budget,
+started and completed generation counts, first terminal reason, next expected
+phase/role, completed phase/role sequence, and every pre-generation
+suppression. Successful validation requires that state to show six started,
+six completed, the exact sequence above, no next expected call, no terminal
+reason, and no suppression.
 
 ## 7. Workload validator acceptance
 
@@ -323,6 +367,10 @@ GPU, Ollama, sudo, and network access. They must cover:
   change, reload UUID/digest/context/offload change, unexpected eviction,
   stability drift, unknown/fatal warning, cleanup failure, interruption, and
   existing-service mutation;
+- a first-call timeout with the queued Llama and Gemma workers suppressed,
+  fake-clock expiry before the second reservation, direct rejection of a
+  seventh generation before backend invocation, and early Phase 3 rejection
+  before any unload;
 - attempt/final/receipt collision and partial-publication rejection;
 - one successful six-call fixture through workload validation, generic
   staging validation, publication, independent S/I/R verification, and final

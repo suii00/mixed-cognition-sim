@@ -25,10 +25,10 @@ from typing import Any, Dict, Mapping, Optional, Sequence
 from tools.validate_run import validate_run
 
 
-SPEC_VERSION = "gate4-ollama-endpoint-reuse-v1.0.0"
+SPEC_VERSION = "gate4-ollama-endpoint-reuse-v1.1.0"
 APPROVAL_SCHEMA_VERSION = "gate4-ollama-endpoint-reuse-approval-v1.0.0"
-OBSERVATION_SCHEMA_VERSION = "gate4-ollama-endpoint-reuse-observations-v1.0.0"
-RESULT_SCHEMA_VERSION = "gate4-ollama-endpoint-reuse-result-v1.0.0"
+OBSERVATION_SCHEMA_VERSION = "gate4-ollama-endpoint-reuse-observations-v1.1.0"
+RESULT_SCHEMA_VERSION = "gate4-ollama-endpoint-reuse-result-v1.1.0"
 INDEX_SCHEMA_VERSION = "gate4-ollama-endpoint-reuse-artifact-index-v1.0.0"
 VALIDATION_SCHEMA_VERSION = "gate4-ollama-endpoint-reuse-validation-v1.0.0"
 PUBLISHER_APPROVAL_SCHEMA_VERSION = "gate4-gpu-run-approval-v1.0.0"
@@ -1009,6 +1009,8 @@ def validate_attempt(
                 "ended_utc",
                 "elapsed_seconds",
                 "generation_calls",
+                "completed_generation_calls",
+                "terminal_stop_reason",
                 "administrative_unloads",
                 "cleanup_passed",
                 "run_id",
@@ -1045,6 +1047,10 @@ def validate_attempt(
             errors.append("wall_time_ceiling_exceeded")
         if result["generation_calls"] != 6:
             errors.append("generation_call_count_mismatch")
+        if result["completed_generation_calls"] != 6:
+            errors.append("generation_completion_count_mismatch")
+        if result["terminal_stop_reason"] is not None:
+            errors.append("generation_terminal_stop_latched")
         if result["administrative_unloads"] != 6:
             errors.append("administrative_unload_count_mismatch")
         if result["cleanup_passed"] is not True:
@@ -1071,6 +1077,7 @@ def validate_attempt(
                 "stability_snapshots",
                 "warnings",
                 "cleanup",
+                "execution_gate",
             },
             "observations",
         )
@@ -1078,6 +1085,42 @@ def validate_attempt(
             errors.append("observation_schema_mismatch")
         if observations["approval_sha256"] != approval_sha:
             errors.append("observation_approval_hash_mismatch")
+
+        execution_gate = observations["execution_gate"]
+        gate_fields = {
+            "maximum_generation_calls",
+            "started_generation_calls",
+            "completed_generation_calls",
+            "terminal_stop_reason",
+            "next_expected_phase_role",
+            "completed_phase_roles",
+            "suppressed_requests",
+        }
+        if not isinstance(execution_gate, dict) or set(execution_gate) != gate_fields:
+            errors.append("execution_gate_shape_invalid")
+        else:
+            expected_completed = [
+                {"phase": phase, "role": role}
+                for phase, role in (
+                    (phase, role)
+                    for phase in ("phase1", "phase3")
+                    for role in ROLE_ORDER
+                )
+            ]
+            if execution_gate["maximum_generation_calls"] != approval["maximum_generation_calls"]:
+                errors.append("execution_gate_budget_mismatch")
+            if execution_gate["started_generation_calls"] != result["generation_calls"]:
+                errors.append("execution_gate_started_count_mismatch")
+            if execution_gate["completed_generation_calls"] != result["completed_generation_calls"]:
+                errors.append("execution_gate_completed_count_mismatch")
+            if execution_gate["terminal_stop_reason"] != result["terminal_stop_reason"]:
+                errors.append("execution_gate_terminal_reason_mismatch")
+            if execution_gate["next_expected_phase_role"] is not None:
+                errors.append("execution_gate_sequence_incomplete")
+            if execution_gate["completed_phase_roles"] != expected_completed:
+                errors.append("execution_gate_completed_sequence_mismatch")
+            if execution_gate["suppressed_requests"] != []:
+                errors.append("execution_gate_suppressed_requests_present")
 
         preflight = observations["preflight"]
         if not isinstance(preflight, dict) or preflight.get("passed") is not True:

@@ -33,6 +33,8 @@ class FakeBackend:
         self.scenario = scenario
         self.generation_count = 0
         self.unload_count = 0
+        self.cleanup_called = False
+        self.generation_sequence = []
         self._warnings = []
         if scenario == "known_warning":
             self._warnings = [
@@ -156,9 +158,17 @@ class FakeBackend:
     def generate(self, approval, endpoint, server, request_payload):
         self.generation_count += 1
         ordinal = self.generation_count
+        phase = (
+            "phase1"
+            if "Decide what message to send" in request_payload["messages"][0]["content"]
+            else "phase3"
+        )
+        self.generation_sequence.append((phase, endpoint["model_role"]))
+        if self.scenario == "timeout_first" and ordinal == 1:
+            raise TimeoutError("synthetic approved request timeout")
         if self.scenario == "slow":
             time.sleep(0.21)
-        phase1 = "Decide what message to send" in request_payload["messages"][0]["content"]
+        phase1 = phase == "phase1"
         parsed = (
             {"message": f"message-{ordinal}", "reasoning": "synthetic"}
             if phase1
@@ -285,6 +295,7 @@ class FakeBackend:
         }
 
     def cleanup(self, approval, attempt_dir, preflight, servers):
+        self.cleanup_called = True
         final_unloads = [
             {
                 "role": endpoint["model_role"],
@@ -457,24 +468,67 @@ class EndpointReuseTests(unittest.TestCase):
     def source_probe(_repository):
         return orchestrator.SourceState(SOURCE_SHA, False)
 
-    def run_fixture(self, scenario="success", approval=None):
+    def run_fixture(self, scenario="success", approval=None, backend=None, **run_kwargs):
         value = approval or self.approval_value(
             approval_id=f"reuse-{scenario.replace('_', '-')}"
         )
         path, digest = self.write_approval(value)
+        active_backend = backend or FakeBackend(scenario)
         with self.cpu_only_runtime():
             receipt = orchestrator.run_approved_endpoint_reuse(
                 path,
                 digest,
                 repository=REPO_ROOT,
-                backend=FakeBackend(scenario),
+                backend=active_backend,
                 source_probe=self.source_probe,
                 sleep_fn=lambda _seconds: None,
+                **run_kwargs,
             )
         return value, path, digest, receipt
 
+    def make_request(self, approval, phase, role, ordinal):
+        endpoint = next(
+            endpoint
+            for endpoint in approval["endpoints"]
+            if endpoint["model_role"] == role
+        )
+        prompt = (
+            "Decide what message to send"
+            if phase == "phase1"
+            else "Decide how to move"
+        )
+        return SimpleNamespace(
+            model=endpoint["model_tag"],
+            phase=phase,
+            request_id=f"direct-{phase}-{role}-{ordinal}",
+            prompt=prompt,
+            temperature=approval["temperature"],
+            max_tokens=approval["num_predict"],
+            llm_overrides={"num_ctx": approval["num_ctx"]},
+        )
+
+    def make_transport(self, approval, backend, name="direct", monotonic_fn=lambda: 0.0):
+        preflight = backend.preflight(approval, self.root / name)
+        servers = backend.start_servers(approval, self.root / name, preflight)
+        transcript = orchestrator.Transcript(self.root / f"{name}.jsonl")
+        transcript.enter("preflight_passed", {})
+        transcript.enter(
+            "servers_started",
+            {"server_pids": [server["server_pid"] for server in servers]},
+        )
+        transport = orchestrator.ReuseTransport(
+            approval,
+            backend,
+            servers,
+            transcript,
+            approval["maximum_wall_seconds"],
+            monotonic_fn=monotonic_fn,
+        )
+        return transport, transcript
+
     def test_successful_six_call_fixture_publishes_and_independently_verifies(self):
-        approval, _, digest, receipt = self.run_fixture("success")
+        backend = FakeBackend()
+        approval, _, digest, receipt = self.run_fixture("success", backend=backend)
         self.assertTrue(receipt.publication_verified)
         self.assertEqual(receipt.operational_backend_result, "PASS")
         self.assertIsNotNone(receipt.final_path)
@@ -487,6 +541,21 @@ class EndpointReuseTests(unittest.TestCase):
             (receipt.attempt_path / validator.OBSERVATIONS_FILENAME).read_text()
         )
         self.assertEqual(len(observations["generations"]), 6)
+        self.assertEqual(
+            observations["execution_gate"],
+            {
+                "maximum_generation_calls": 6,
+                "started_generation_calls": 6,
+                "completed_generation_calls": 6,
+                "terminal_stop_reason": None,
+                "next_expected_phase_role": None,
+                "completed_phase_roles": [
+                    {"phase": phase, "role": role}
+                    for phase, role in orchestrator.EXPECTED_PHASE_ROLE_ORDER
+                ],
+                "suppressed_requests": [],
+            },
+        )
         self.assertEqual(
             [(item["phase"], item["role"]) for item in observations["generations"]],
             list(orchestrator.EXPECTED_PHASE_ROLE_ORDER),
@@ -511,6 +580,120 @@ class EndpointReuseTests(unittest.TestCase):
         self.assertFalse(external["gate4_formal_pass"])
         self.assertFalse(external["research_eligible"])
         self.assertTrue(external["workload_revalidated"])
+        self.assertEqual(
+            backend.generation_sequence,
+            list(orchestrator.EXPECTED_PHASE_ROLE_ORDER),
+        )
+        self.assertEqual(backend.unload_count, 3)
+        self.assertEqual(len(observations["cleanup"]["final_unloads"]), 3)
+
+    def test_timeout_latches_terminal_and_suppresses_queued_generation(self):
+        backend = FakeBackend("timeout_first")
+        _, _, _, receipt = self.run_fixture("timeout_first", backend=backend)
+        self.assertEqual(backend.generation_count, 1)
+        self.assertEqual(backend.generation_sequence, [("phase1", "qwen")])
+        self.assertTrue(backend.cleanup_called)
+        self.assertFalse(receipt.publication_verified)
+        self.assertIsNone(receipt.final_path)
+        observations = json.loads(
+            (receipt.attempt_path / validator.OBSERVATIONS_FILENAME).read_text()
+        )
+        gate = observations["execution_gate"]
+        self.assertEqual(gate["started_generation_calls"], 1)
+        self.assertEqual(gate["completed_generation_calls"], 0)
+        self.assertEqual(gate["terminal_stop_reason"], "generation_timeout:TimeoutError")
+        self.assertEqual(
+            [(item["phase"], item["role"]) for item in gate["suppressed_requests"]],
+            [("phase1", "llama"), ("phase1", "gemma")],
+        )
+        events = [
+            json.loads(line)
+            for line in (receipt.attempt_path / validator.TRANSCRIPT_FILENAME)
+            .read_text()
+            .splitlines()
+        ]
+        self.assertEqual(
+            len([event for event in events if event["event"] == "generation_suppressed"]),
+            2,
+        )
+
+    def test_deadline_before_second_reservation_suppresses_remaining_calls(self):
+        class MutableClock:
+            value = 0.0
+
+            def __call__(self):
+                return self.value
+
+        clock = MutableClock()
+        backend = FakeBackend()
+        original_snapshot = backend.snapshot
+
+        def snapshot_and_expire(*args, **kwargs):
+            value = original_snapshot(*args, **kwargs)
+            if backend.generation_count == 1:
+                clock.value = 61.0
+            return value
+
+        backend.snapshot = snapshot_and_expire
+        approval = self.approval_value("reuse-deadline-before-second")
+        _, _, _, receipt = self.run_fixture(
+            approval=approval,
+            backend=backend,
+            monotonic_fn=clock,
+        )
+        self.assertEqual(backend.generation_count, 1)
+        self.assertTrue(backend.cleanup_called)
+        self.assertFalse(receipt.publication_verified)
+        observations = json.loads(
+            (receipt.attempt_path / validator.OBSERVATIONS_FILENAME).read_text()
+        )
+        gate = observations["execution_gate"]
+        self.assertEqual(gate["completed_generation_calls"], 1)
+        self.assertEqual(gate["terminal_stop_reason"], "approved_wall_time_expired")
+        self.assertEqual(len(gate["suppressed_requests"]), 2)
+
+    def test_direct_transport_rejects_seventh_call_before_backend(self):
+        approval = self.approval_value("reuse-direct-budget")
+        backend = FakeBackend()
+        transport, transcript = self.make_transport(approval, backend, "budget")
+        telemetry = lambda _event, _amount=1: None
+        ordinal = 0
+        for phase in ("phase1", "phase3"):
+            for role in validator.ROLE_ORDER:
+                ordinal += 1
+                transport(self.make_request(approval, phase, role, ordinal), telemetry)
+        with self.assertRaises(orchestrator.EndpointReuseExecutionError):
+            transport(
+                self.make_request(approval, "phase3", "gemma", 7),
+                telemetry,
+            )
+        transcript.close()
+        self.assertEqual(backend.generation_count, 6)
+        self.assertEqual(
+            backend.generation_sequence,
+            list(orchestrator.EXPECTED_PHASE_ROLE_ORDER),
+        )
+        gate = transport.execution_gate.snapshot()
+        self.assertEqual(gate["started_generation_calls"], 6)
+        self.assertEqual(gate["completed_generation_calls"], 6)
+        self.assertEqual(len(gate["suppressed_requests"]), 1)
+
+    def test_early_phase3_fails_before_unload_or_generation(self):
+        approval = self.approval_value("reuse-direct-early-phase3")
+        backend = FakeBackend()
+        transport, transcript = self.make_transport(approval, backend, "early-phase3")
+        with self.assertRaises(orchestrator.EndpointReuseExecutionError):
+            transport(
+                self.make_request(approval, "phase3", "qwen", 1),
+                lambda _event, _amount=1: None,
+            )
+        transcript.close()
+        self.assertEqual(backend.unload_count, 0)
+        self.assertEqual(backend.generation_count, 0)
+        gate = transport.execution_gate.snapshot()
+        self.assertEqual(gate["started_generation_calls"], 0)
+        self.assertEqual(gate["terminal_stop_reason"], "phase1_state_not_complete")
+        self.assertEqual(len(gate["suppressed_requests"]), 1)
 
     def test_known_warning_is_retained_without_formal_promotion(self):
         _, _, _, receipt = self.run_fixture("known_warning")
