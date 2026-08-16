@@ -303,8 +303,10 @@ execution requires a later specification and version change.
 ## 31. Deferred backend smoke
 
 Real Ollama/vLLM API contract, ordering, artifact identity, and resource smoke
-are deferred. Gate 3 makes no backend equivalence, determinism, speed, or GPU
-claim.
+are deferred from Gate 3. The staged Gate 4A Ollama reference smoke and the
+subsequent Gate 4B vLLM adapter smoke are governed by
+`docs/GATE4_BACKEND_SMOKE_SPEC.md`. Gate 3 makes no backend equivalence,
+determinism, speed, or GPU claim.
 
 ## 32. Deferred production registry
 
