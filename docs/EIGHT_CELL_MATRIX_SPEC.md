@@ -1,6 +1,6 @@
 # Eight-Cell Matrix Specification
 
-Version: `eight-cell-matrix-v1.0.1`
+Version: `eight-cell-matrix-v1.1.0`
 
 ## 1. Scope
 
@@ -101,13 +101,15 @@ is the set of eight cells for one replicate, not a selection across replicates.
 ## 13. Plan schema
 
 The plan is UTF-8 JSON with schema
-`eight-cell-matrix-plan-v1.0.0`. Duplicate object keys and unknown top-level
+`eight-cell-matrix-plan-v1.1.0`. Duplicate object keys and unknown top-level
 fields are rejected. Its exact top-level fields are `schema_version`,
-`matrix_id`, `protocol_version`, `metric_version`, `base_config`,
-`model_catalog`, `replicates`, `candidate_registry`, and `backend_freeze`.
-`metric_version` is `metric-v2.0.0`; protocol cannot be blank or
-`unversioned`. The base path is relative, cannot contain `..`, and is pinned by
-SHA-256. Matrix and replicate IDs must satisfy the canonical run-ID rules.
+`matrix_id`, `protocol_version`, `metric_version`, `execution_mode`,
+`base_config`, `model_catalog`, `replicates`, `candidate_registry`, and
+`backend_freeze`. `metric_version` is `metric-v2.0.0`; protocol cannot be blank
+or `unversioned`. The required execution mode is a string and is exactly one of
+`scripted_smoke` or `reference_ollama`. The base path is relative, cannot
+contain `..`, and is pinned by SHA-256. Matrix and replicate IDs must satisfy
+the canonical run-ID rules.
 
 Registry and backend records are either `not_frozen` with null evidence, or
 `frozen` with respectively a lowercase 64-hex SHA-256 or a non-empty evidence
@@ -115,9 +117,10 @@ ID. No production values are committed as part of Gate 3.
 
 ## 14. Plan hash
 
-The caller supplies the SHA-256 of the exact plan file bytes. Validation stops
-before batch publication if it differs. `plan.json` is a canonical copy; the
-source-byte hash remains recorded separately in plan and batch manifests.
+The caller supplies the SHA-256 of the exact plan file bytes. The hash includes
+the required execution-mode declaration. Validation stops before batch
+publication if it differs. `plan.json` is a canonical copy; the source-byte
+hash remains recorded separately in plan and batch manifests.
 
 ## 15. Config generation
 
@@ -127,10 +130,15 @@ metric, research eligibility, and effective edge policy. Execution-affecting
 defaults are explicit. Generated configs are canonical JSON and immutable after
 publication.
 
-The execution mode in `batch_meta.json`, every planned row, every generated
-config, and every completed run's saved config snapshot is one evidence chain.
-All values must be recognized and identical. The validator reports only this
-unanimous derived value; an invalid or conflicting value is a contradiction.
+The plan is the authoritative source of execution mode. Its value is copied to
+every planned row, generated config, completed run's saved config snapshot,
+`batch_meta.json`, the top level of `batch_manifest.json`, and every batch-
+manifest run row. The per-run and batch validation results report only the
+unanimous value recovered from that complete evidence chain. An out-of-band
+argument cannot override the plan; any retained argument may only assert the
+same value. A missing, invalid, or conflicting declaration in a canonical
+completed artifact is `FAIL` with exit 3, including after ordinary hashes and
+manifests have been recomputed.
 
 ## 16. Permitted config differences
 
@@ -144,7 +152,9 @@ protocol, metric, bloc structure, and prompt hash remain paired controls.
 
 `paired_control_hash` is SHA-256 over canonical JSON after removing the allowed
 cell manipulation fields in section 16 and adding the prompt file-byte hash.
-It must be identical across all eight cells of a replicate.
+The recomputable `research_eligible` summary is also excluded because it is not
+an experimental input; it is checked separately against authoritative evidence.
+The hash must be identical across all eight cells of a replicate.
 
 ## 18. Initial-state input hash
 
@@ -187,11 +197,14 @@ The same matrix ID cannot be retried; a new experiment requires a new matrix ID.
 
 ## 24. Scripted smoke mode
 
-`scripted_smoke` performs no network operation. Each request records one mock
+`scripted_smoke` performs no network operation. It is selected by the plan,
+not by an overriding CLI value. Each request records one mock
 HTTP attempt. Phase 1 emits a non-empty deterministic message derived only from
 step and agent ID. Phase 3 stays with empty direction, memory, and reasoning.
 The transport does not execute prompt content or include model/bloc names in its
-message. Run and batch metadata set `research_eligible` false.
+message. Every persisted eligibility summary is false. The smoke profile is
+`PASS`; the research profile is `UNVERIFIABLE` because scripted output is never
+research eligible.
 
 ## 25. Research eligibility boundary
 
@@ -200,13 +213,30 @@ not research eligible and supplies no behavioral evidence. Missing registry,
 backend, model artifact, source-cleanliness, protocol-freeze, plan-freeze, or
 run-start-approval evidence remains explicitly unverified.
 
-Research eligibility is computed only from validated underlying evidence. The
-persisted `research_eligible` fields in Gate 3 batch metadata, planned rows,
-generated configs, saved run config snapshots, and batch-manifest rows must be
-false and are never inputs that can promote a result. A consistently
-`scripted_smoke` run or batch under the research profile is `UNVERIFIABLE`; a
-cross-layer execution-mode conflict is `FAIL` even if summary or manifest hashes
-have been recomputed.
+Research eligibility is independently derived from authoritative evidence
+before any persisted summary is inspected. The derivation requires unanimous
+non-scripted execution-mode evidence, strict validity, clean exact source
+provenance, frozen backend evidence with an ID, a frozen production registry
+with a valid hash, complete model artifact fields, frozen protocol and matrix
+evidence, run-start approval, complete runs/batch, no invalid evidence, and no
+unverified research requirement. Batch eligibility additionally requires every
+planned run to be independently eligible. A scripted, failed, aborted,
+not-started, invalid, or unverified run therefore makes the batch ineligible.
+
+Persisted `research_eligible` values in planned rows, generated configs, saved
+run config snapshots, batch metadata, the batch-manifest top level, and batch-
+manifest run rows are recomputable summaries only. They are never inputs that
+promote or demote the independent derivation. Each required summary is compared
+after derivation: matching values are accepted; stale `false` against derived
+`true` and unsupported `true` against derived `false` are contradictions and
+return `FAIL`/exit 3. A missing or non-Boolean summary in a canonical completed
+artifact is also invalid evidence. Missing research evidence without a
+contradiction remains `UNVERIFIABLE`/exit 2.
+
+A repository-supported synthetic `reference_ollama` fixture exercises the
+fully positive eligibility logic with structurally valid fake evidence and zero
+network calls. It is only a validator-logic control. It is not backend, model,
+GPU, pilot, or research-run evidence; real backend validity remains Gate 4.
 
 ## 26. Research validator profiles
 
@@ -215,7 +245,10 @@ communication-boundary, and manifest integrity and permits declared research
 evidence to be unfrozen. The `research` profile applies the same checks and also
 requires clean exact source provenance, a non-scripted backend, frozen backend
 and registry evidence, complete model artifact details, frozen protocol and
-plan, complete batch evidence, and a run-start approval reference.
+plan, complete batch evidence, and a run-start approval reference. Persisted
+eligibility summaries are checked against the same independently recomputed
+evidence under both profiles, while only a successful research-profile result
+exposes `research_eligible=true` in validator output.
 
 ## 27. Validator exit codes
 
@@ -223,14 +256,21 @@ Research validation returns 0 for PASS under the selected profile, 2 for
 UNVERIFIABLE required research evidence, 3 for contradiction/tampering/strict
 failure, and 64 for invocation or validator-configuration errors. Runner exits
 0 for completed smoke, 1 for failed/aborted execution, 2 for invalid pinned
-input, 3 for batch collision, and 64 for invalid invocation.
+input, 3 for batch collision, and 64 for invalid invocation. Normal argparse
+help is not an error: `python -m tools.research_validator --help` writes help to
+stdout, leaves stderr empty, and exits 0.
 
 ## 28. Batch manifest
 
-The final manifest lists every planned row, its status, config identity, run
+The final manifest uses schema `eight-cell-batch-manifest-v1.1.0`. Its top level
+records execution mode and the independently derived batch eligibility summary.
+It lists every planned row with execution mode, status, config identity, run
 directory, run-meta manifest, raw manifest, strict result, original strict
-unverifiable list, smoke result, and research eligibility. It records counts and
-the plan/spec/base/prompt pins. `batch_meta.json` records its file SHA-256.
+unverifiable list, smoke result, and independently derived run eligibility
+summary. It also records counts and the plan/spec/base/prompt pins.
+`batch_meta.json` records its file SHA-256. The normal runner derives summaries
+from planned and validated run records; callers cannot supply arbitrary summary
+values.
 
 ## 29. Failure retention
 
@@ -258,8 +298,9 @@ thresholds, and production hashes cannot be inferred from smoke fixtures.
 ## 33. Version bump rule
 
 Changing the cell set/order, rotation, edge semantics, bloc composition, paired
-unit, run-ID scheme, plan schema, plan/batch manifest schema, eligibility rule,
-or validator exit classification requires a matrix-spec version bump and new
+unit, run-ID scheme, execution-mode evidence chain, plan schema, plan/batch
+manifest schema, eligibility derivation or summary-comparison contract, or
+validator exit classification requires a matrix-spec version bump and new
 regression evidence.
 
 ## 34. Regression fixtures
@@ -272,5 +313,9 @@ and concurrent collision; eight-cell smoke with network guard; success and
 failure manifests; failed/aborted/not-started retention; validator exits
 0/2/3/64; config/cell/policy/run-ID/seed/manifest/extra/missing/cross-edge
 tampering; cross-layer execution-mode agreement; non-authoritative persisted
-research-eligibility declarations; recomputed-manifest mismatch attacks;
-run/batch CLI classification agreement; and raw-run byte immutability.
+research-eligibility declarations; missing execution mode at every completed
+evidence layer; recomputed-manifest mismatch attacks; a zero-network synthetic
+positive eligibility control; stale-false and unsupported-true summary
+contradictions; a non-scripted approval-only UNVERIFIABLE control; OS-process
+help behavior; run/batch CLI classification agreement; and raw-run byte
+immutability.

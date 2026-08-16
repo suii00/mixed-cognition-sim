@@ -26,10 +26,10 @@ from engine.provenance import (
 )
 
 
-PLAN_SCHEMA_VERSION = "eight-cell-matrix-plan-v1.0.0"
-MATRIX_SPEC_VERSION = "eight-cell-matrix-v1.0.1"
+PLAN_SCHEMA_VERSION = "eight-cell-matrix-plan-v1.1.0"
+MATRIX_SPEC_VERSION = "eight-cell-matrix-v1.1.0"
 PLAN_MANIFEST_VERSION = "eight-cell-plan-manifest-v1.0.0"
-BATCH_MANIFEST_VERSION = "eight-cell-batch-manifest-v1.0.0"
+BATCH_MANIFEST_VERSION = "eight-cell-batch-manifest-v1.1.0"
 METRIC_VERSION = "metric-v2.0.0"
 EXECUTION_MODES = frozenset({"scripted_smoke", "reference_ollama"})
 CANONICAL_BLOCS = ("alpha", "beta", "neutral")
@@ -48,6 +48,7 @@ PLAN_FIELDS = frozenset({
     "matrix_id",
     "protocol_version",
     "metric_version",
+    "execution_mode",
     "base_config",
     "model_catalog",
     "replicates",
@@ -290,6 +291,9 @@ def validate_plan_data(data: Dict[str, Any]) -> None:
         raise PlanValidationError("protocol_version must be non-empty and versioned")
     if data["metric_version"] != METRIC_VERSION:
         raise PlanValidationError(f"metric_version must be {METRIC_VERSION}")
+    execution_mode = data["execution_mode"]
+    if not isinstance(execution_mode, str) or execution_mode not in EXECUTION_MODES:
+        raise PlanValidationError("execution_mode is invalid")
 
     base = data["base_config"]
     if not isinstance(base, dict) or set(base) != {"path", "sha256"}:
@@ -413,6 +417,7 @@ def _paired_control_payload(config: Dict[str, Any], prompt_sha256: str) -> Dict[
         "model_condition",
         "rotation_index",
         "execution_mode",
+        "research_eligible",
     ):
         simulation.pop(key, None)
     value["agents"].pop("edge_policy", None)
@@ -446,11 +451,9 @@ def build_bundle(
     matrix_spec_sha256: str,
     *,
     repo_root: Optional[Path] = None,
-    execution_mode: str = "scripted_smoke",
 ) -> MatrixBundle:
     spec_sha = _require_hex64(matrix_spec_sha256, "matrix spec SHA-256")
-    if execution_mode not in EXECUTION_MODES:
-        raise PlanValidationError("invalid execution_mode")
+    execution_mode = loaded.data["execution_mode"]
     root = (repo_root or Path(__file__).resolve().parents[1]).resolve()
     prompt_sha = compute_prompt_hash(root)
     rows: List[Dict[str, Any]] = []

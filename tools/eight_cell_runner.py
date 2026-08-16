@@ -98,7 +98,7 @@ def _batch_meta(
         "status": "running",
         "start_time_utc": now,
         "end_time_utc": None,
-        "execution_mode": "scripted_smoke",
+        "execution_mode": bundle.plan["execution_mode"],
         "research_eligible": False,
         "protocol_version": bundle.plan["protocol_version"],
         "metric_version": bundle.plan["metric_version"],
@@ -145,6 +145,7 @@ def _manifest_row(planned: Dict[str, Any]) -> Dict[str, Any]:
         "run_id": planned["run_id"],
         "cell_id": planned["cell_id"],
         "replicate_id": planned["replicate_id"],
+        "execution_mode": planned["execution_mode"],
         "status": "not_started",
         "config_path": planned["config_path"],
         "config_sha256": planned["config_sha256"],
@@ -188,11 +189,18 @@ def _finalize_batch(
     failure: Optional[BaseException] = None,
 ) -> Dict[str, Any]:
     counts = _status_counts(rows)
+    research_eligible = (
+        status == "completed"
+        and bool(rows)
+        and all(row.get("research_eligible") is True for row in rows)
+    )
     manifest = {
         "schema_version": BATCH_MANIFEST_VERSION,
         "matrix_spec_version": MATRIX_SPEC_VERSION,
         "matrix_id": bundle.plan["matrix_id"],
         "status": status,
+        "execution_mode": bundle.plan["execution_mode"],
+        "research_eligible": research_eligible,
         "plan_sha256": bundle.plan_sha256,
         "matrix_spec_sha256": bundle.matrix_spec_sha256,
         "base_config_sha256": bundle.plan["base_config"]["sha256"],
@@ -209,6 +217,7 @@ def _finalize_batch(
     )
     meta.update(counts)
     meta["status"] = status
+    meta["research_eligible"] = research_eligible
     meta["end_time_utc"] = utc_now_iso()
     meta["batch_manifest_sha256"] = sha256_file(manifest_path)
     meta["failure_type"] = type(failure).__name__ if failure is not None else None
@@ -224,6 +233,10 @@ def run_smoke_batch(
     transport: Optional[Callable] = None,
 ) -> Path:
     """Claim and execute one sequential scripted batch; never resume it."""
+    if bundle.plan.get("execution_mode") != "scripted_smoke":
+        raise PlanValidationError(
+            "smoke runner requires plan execution_mode scripted_smoke"
+        )
     repository = (repo_root or Path(__file__).resolve().parents[1]).resolve()
     try:
         git_info = provenance.collect_git_info(repository)
@@ -291,6 +304,9 @@ def run_smoke_batch(
                     "smoke_errors": list(smoke.errors),
                     "smoke_unverified_research_requirements": list(
                         smoke.unverified_research_requirements
+                    ),
+                    "research_eligible": bool(
+                        smoke.details.get("derived_research_eligible", False)
                     ),
                 })
                 if not strict.valid or smoke.exit_code != 0:

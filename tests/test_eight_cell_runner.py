@@ -83,9 +83,9 @@ class EightCellRunnerTests(unittest.TestCase):
         text = plan_path.read_text(encoding="utf-8")
         duplicate_path.write_text(
             text.replace(
-                '"schema_version": "eight-cell-matrix-plan-v1.0.0",',
-                '"schema_version": "eight-cell-matrix-plan-v1.0.0",\n'
-                '  "schema_version": "eight-cell-matrix-plan-v1.0.0",',
+                '"schema_version": "eight-cell-matrix-plan-v1.1.0",',
+                '"schema_version": "eight-cell-matrix-plan-v1.1.0",\n'
+                '  "schema_version": "eight-cell-matrix-plan-v1.1.0",',
                 1,
             ),
             encoding="utf-8",
@@ -104,6 +104,51 @@ class EightCellRunnerTests(unittest.TestCase):
         self.assert_plan_invalid(
             lambda plan: plan.update({"metric_version": "metric-v1"}), "metric"
         )
+
+    def test_plan_execution_mode_is_required_validated_hashed_and_authoritative(self):
+        scripted_root = self.root / "scripted"
+        reference_root = self.root / "reference"
+        scripted_root.mkdir()
+        reference_root.mkdir()
+        _, scripted_sha, _, scripted = write_plan_fixture(scripted_root)
+        _, reference_sha, _, reference = write_plan_fixture(
+            reference_root, execution_mode="reference_ollama"
+        )
+        self.assertNotEqual(scripted_sha, reference_sha)
+        self.assertEqual(scripted.plan["execution_mode"], "scripted_smoke")
+        self.assertEqual(reference.plan["execution_mode"], "reference_ollama")
+        self.assertTrue(
+            all(row["execution_mode"] == "reference_ollama" for row in reference.rows)
+        )
+        self.assertTrue(
+            all(
+                config["simulation"]["execution_mode"] == "reference_ollama"
+                for config in reference.configs.values()
+            )
+        )
+        self.assert_plan_invalid(
+            lambda plan: plan.pop("execution_mode"), "missing=execution_mode"
+        )
+        self.assert_plan_invalid(
+            lambda plan: plan.update({"execution_mode": "unknown"}),
+            "execution_mode",
+        )
+        self.assert_plan_invalid(
+            lambda plan: plan.update({"execution_mode": 1}),
+            "execution_mode",
+        )
+
+        transport = ScriptedSmokeTransport()
+        output = self.root / "reference-output"
+        with self.assertRaisesRegex(PlanValidationError, "requires plan execution_mode"):
+            run_smoke_batch(
+                reference,
+                output,
+                repo_root=REPO_ROOT,
+                transport=transport,
+            )
+        self.assertEqual(transport.call_count, 0)
+        self.assertFalse(output.exists())
 
     def test_plan_rejects_base_catalog_replicate_and_freeze_errors(self):
         self.assert_plan_invalid(
@@ -231,11 +276,54 @@ class EightCellRunnerTests(unittest.TestCase):
         manifest = json.loads(
             (batch_dir / "batch_manifest.json").read_text(encoding="utf-8")
         )
+        plan = json.loads((batch_dir / "plan.json").read_text(encoding="utf-8"))
+        meta = json.loads(
+            (batch_dir / "batch_meta.json").read_text(encoding="utf-8")
+        )
         self.assertEqual(manifest["planned_runs"], 8)
         self.assertEqual(manifest["completed_runs"], 8)
         self.assertEqual(manifest["status"], "completed")
+        self.assertEqual(
+            plan["schema_version"], "eight-cell-matrix-plan-v1.1.0"
+        )
+        self.assertEqual(
+            manifest["schema_version"],
+            "eight-cell-batch-manifest-v1.1.0",
+        )
+        self.assertEqual(
+            manifest["matrix_spec_version"], "eight-cell-matrix-v1.1.0"
+        )
+        self.assertEqual(plan["execution_mode"], "scripted_smoke")
+        self.assertEqual(meta["execution_mode"], "scripted_smoke")
+        self.assertFalse(meta["research_eligible"])
+        self.assertEqual(manifest["execution_mode"], "scripted_smoke")
+        self.assertFalse(manifest["research_eligible"])
+        self.assertTrue(
+            all(row["execution_mode"] == "scripted_smoke" for row in manifest["runs"])
+        )
+        self.assertTrue(
+            all(row["research_eligible"] is False for row in manifest["runs"])
+        )
         labels = {index: ("alpha", "beta", "neutral")[index // 4] for index in range(12)}
         for row in bundle.rows:
+            config = json.loads(
+                (batch_dir / row["config_path"]).read_text(encoding="utf-8")
+            )
+            run_meta = json.loads(
+                (
+                    batch_dir
+                    / "runs"
+                    / f"output_{row['run_id']}"
+                    / "run_meta.json"
+                ).read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                config["simulation"]["execution_mode"], "scripted_smoke"
+            )
+            self.assertEqual(
+                run_meta["config"]["simulation"]["execution_mode"],
+                "scripted_smoke",
+            )
             messages = read_jsonl(
                 batch_dir / "runs" / f"output_{row['run_id']}" / "messages.jsonl"
             )

@@ -5,15 +5,25 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
-from engine.provenance import build_raw_manifest, file_manifest
+from engine.provenance import (
+    build_raw_manifest,
+    compute_config_hash,
+    file_manifest,
+)
 from tests.gate3_fixtures import (
     REPO_ROOT,
+    make_synthetic_research_batch,
     patched_gate3_environment,
     tree_hashes,
     write_plan_fixture,
 )
-from tools.eight_cell_core import canonical_json_file_bytes, sha256_file
+from tools.eight_cell_core import (
+    canonical_json_file_bytes,
+    paired_control_hash,
+    sha256_file,
+)
 from tools.eight_cell_runner import run_smoke_batch
 from tools.research_validator import (
     validate_batch_profile,
@@ -80,6 +90,49 @@ class ResearchValidatorTests(unittest.TestCase):
         run_dir = batch / "runs" / f"output_{row['run_id']}"
         return row, config_path, run_dir
 
+    def refresh_integrity_evidence(self, batch: Path) -> None:
+        plan_path = batch / "plan.json"
+        rows_path = batch / "planned_runs.jsonl"
+        meta_path = batch / "batch_meta.json"
+        plan_manifest_path = batch / "plan_manifest.json"
+        batch_manifest_path = batch / "batch_manifest.json"
+        rows = self.read_rows(batch)
+        for row in rows:
+            config = self.read_json(batch / row["config_path"])
+            row["config_sha256"] = compute_config_hash(config)
+            row["paired_control_hash"] = paired_control_hash(
+                config, row["prompt_sha256"]
+            )
+        self.write_rows(batch, rows)
+
+        meta = self.read_json(meta_path)
+        meta["plan_sha256"] = sha256_file(plan_path)
+        plan_manifest = self.read_json(plan_manifest_path)
+        plan_manifest["source_plan_sha256"] = meta["plan_sha256"]
+        for relative in list(plan_manifest["files"]):
+            plan_manifest["files"][relative] = file_manifest(batch / relative)
+        self.write_json(plan_manifest_path, plan_manifest)
+        meta["plan_manifest_sha256"] = sha256_file(plan_manifest_path)
+
+        manifest = self.read_json(batch_manifest_path)
+        manifest["plan_sha256"] = meta["plan_sha256"]
+        manifest["plan_manifest_sha256"] = meta["plan_manifest_sha256"]
+        row_by_id = {row["run_id"]: row for row in rows}
+        for manifest_row in manifest["runs"]:
+            run_id = manifest_row["run_id"]
+            row = row_by_id[run_id]
+            manifest_row["config_sha256"] = row["config_sha256"]
+            run_meta_path = batch / manifest_row["run_directory"] / "run_meta.json"
+            if run_meta_path.is_file():
+                run_meta = self.read_json(run_meta_path)
+                run_meta["config_hash"] = compute_config_hash(run_meta["config"])
+                self.write_json(run_meta_path, run_meta)
+                manifest_row["run_meta_manifest"] = file_manifest(run_meta_path)
+                manifest_row["raw_manifest"] = run_meta.get("raw_manifest")
+        self.write_json(batch_manifest_path, manifest)
+        meta["batch_manifest_sha256"] = sha256_file(batch_manifest_path)
+        self.write_json(meta_path, meta)
+
     def test_smoke_pass_research_unverifiable_and_read_only(self):
         before = tree_hashes(self.batch_dir)
         smoke = validate_batch_profile(self.batch_dir, "smoke")
@@ -113,11 +166,24 @@ class ResearchValidatorTests(unittest.TestCase):
         self.assertEqual(research.details["execution_mode"], "scripted_smoke")
 
     def test_execution_mode_conflicts_fail_across_every_evidence_layer(self):
-        for layer in ("batch", "row", "config", "run"):
+        for layer in (
+            "plan",
+            "row",
+            "config",
+            "run",
+            "batch",
+            "manifest-top",
+            "manifest-row",
+        ):
             with self.subTest(layer=layer):
                 batch = self.copy_batch(f"mode-{layer}")
                 row, config_path, run_dir = self.first_run_paths(batch)
-                if layer == "batch":
+                if layer == "plan":
+                    path = batch / "plan.json"
+                    value = self.read_json(path)
+                    value["execution_mode"] = "reference_ollama"
+                    self.write_json(path, value)
+                elif layer == "batch":
                     meta_path = batch / "batch_meta.json"
                     value = self.read_json(meta_path)
                     value["execution_mode"] = "reference_ollama"
@@ -130,21 +196,98 @@ class ResearchValidatorTests(unittest.TestCase):
                     value = self.read_json(config_path)
                     value["simulation"]["execution_mode"] = "reference_ollama"
                     self.write_json(config_path, value)
-                else:
+                elif layer == "run":
                     meta_path = run_dir / "run_meta.json"
                     value = self.read_json(meta_path)
                     value["config"]["simulation"][
                         "execution_mode"
                     ] = "reference_ollama"
                     self.write_json(meta_path, value)
+                else:
+                    path = batch / "batch_manifest.json"
+                    value = self.read_json(path)
+                    if layer == "manifest-top":
+                        value["execution_mode"] = "reference_ollama"
+                    else:
+                        value["runs"][0]["execution_mode"] = "reference_ollama"
+                    self.write_json(path, value)
+
+                self.refresh_integrity_evidence(batch)
 
                 before = tree_hashes(batch)
-                report = validate_batch_profile(batch, "research")
+                batch_report = validate_batch_profile(batch, "research")
+                run_report = validate_run_profile(
+                    run_dir, batch, self.read_rows(batch)[0], "research"
+                )
+                self.assertEqual(batch_report.exit_code, 3, batch_report.errors)
+                self.assertEqual(run_report.exit_code, 3, run_report.errors)
+                self.assertFalse(batch_report.to_dict()["research_eligible"])
+                self.assertFalse(run_report.to_dict()["research_eligible"])
+                self.assertIsNone(batch_report.details["execution_mode"])
+                self.assertIsNone(run_report.details["execution_mode"])
+                self.assertTrue(
+                    any(
+                        "execution_mode conflict" in error
+                        for error in batch_report.errors + run_report.errors
+                    ),
+                    batch_report.errors + run_report.errors,
+                )
+                self.assertEqual(before, tree_hashes(batch))
+
+    def test_missing_execution_mode_in_each_completed_layer_fails(self):
+        for layer in (
+            "plan",
+            "row",
+            "config",
+            "run",
+            "batch",
+            "manifest-top",
+            "manifest-row",
+        ):
+            with self.subTest(layer=layer):
+                batch = self.copy_batch(f"missing-mode-{layer}")
+                row, config_path, run_dir = self.first_run_paths(batch)
+                if layer == "plan":
+                    path = batch / "plan.json"
+                    value = self.read_json(path)
+                    value.pop("execution_mode")
+                    self.write_json(path, value)
+                elif layer == "row":
+                    rows = self.read_rows(batch)
+                    rows[0].pop("execution_mode")
+                    self.write_rows(batch, rows)
+                elif layer == "config":
+                    value = self.read_json(config_path)
+                    value["simulation"].pop("execution_mode")
+                    self.write_json(config_path, value)
+                elif layer == "run":
+                    path = run_dir / "run_meta.json"
+                    value = self.read_json(path)
+                    value["config"]["simulation"].pop("execution_mode")
+                    self.write_json(path, value)
+                elif layer == "batch":
+                    path = batch / "batch_meta.json"
+                    value = self.read_json(path)
+                    value.pop("execution_mode")
+                    self.write_json(path, value)
+                else:
+                    path = batch / "batch_manifest.json"
+                    value = self.read_json(path)
+                    if layer == "manifest-top":
+                        value.pop("execution_mode")
+                    else:
+                        value["runs"][0].pop("execution_mode")
+                    self.write_json(path, value)
+                self.refresh_integrity_evidence(batch)
+                selected = self.read_rows(batch)[0]
+                before = tree_hashes(batch)
+                report = validate_run_profile(
+                    run_dir, batch, selected, "research"
+                )
                 self.assertEqual(report.exit_code, 3, report.errors)
                 self.assertFalse(report.to_dict()["research_eligible"])
-                self.assertIsNone(report.details["execution_mode"])
                 self.assertTrue(
-                    any("execution_mode conflict" in error for error in report.errors),
+                    any("execution_mode" in error for error in report.errors),
                     report.errors,
                 )
                 self.assertEqual(before, tree_hashes(batch))
@@ -222,7 +365,14 @@ class ResearchValidatorTests(unittest.TestCase):
         self.assertEqual(before, tree_hashes(batch))
 
     def test_persisted_research_eligible_cannot_override_derived_result(self):
-        for layer in ("batch", "row", "config", "run", "manifest"):
+        for layer in (
+            "batch",
+            "row",
+            "config",
+            "run",
+            "manifest-top",
+            "manifest-row",
+        ):
             with self.subTest(layer=layer):
                 batch = self.copy_batch(f"eligible-{layer}")
                 row, config_path, run_dir = self.first_run_paths(batch)
@@ -247,13 +397,18 @@ class ResearchValidatorTests(unittest.TestCase):
                 else:
                     path = batch / "batch_manifest.json"
                     value = self.read_json(path)
-                    value["runs"][0]["research_eligible"] = True
+                    if layer == "manifest-top":
+                        value["research_eligible"] = True
+                    else:
+                        value["runs"][0]["research_eligible"] = True
                     self.write_json(path, value)
 
+                self.refresh_integrity_evidence(batch)
                 before = tree_hashes(batch)
                 report = validate_batch_profile(batch, "research")
                 self.assertEqual(report.exit_code, 3, report.errors)
                 self.assertFalse(report.to_dict()["research_eligible"])
+                self.assertFalse(report.details["derived_research_eligible"])
                 self.assertTrue(
                     any(
                         "research eligible" in error
@@ -263,6 +418,141 @@ class ResearchValidatorTests(unittest.TestCase):
                     report.errors,
                 )
                 self.assertEqual(before, tree_hashes(batch))
+
+    def test_synthetic_positive_eligibility_is_derived_and_matches_summaries(self):
+        batch = self.copy_batch("synthetic-positive")
+        make_synthetic_research_batch(batch)
+        row = self.read_rows(batch)[0]
+        run_dir = batch / "runs" / f"output_{row['run_id']}"
+        before = tree_hashes(batch)
+        with mock.patch(
+            "engine.llm_client.requests.post",
+            side_effect=AssertionError("validator logic must not use the network"),
+        ) as post:
+            smoke = validate_batch_profile(batch, "smoke")
+            research = validate_batch_profile(batch, "research")
+            run_research = validate_run_profile(
+                run_dir, batch, row, "research"
+            )
+        self.assertEqual(post.call_count, 0)
+        self.assertEqual(smoke.exit_code, 0, smoke.errors)
+        self.assertFalse(smoke.to_dict()["research_eligible"])
+        self.assertTrue(smoke.details["derived_research_eligible"])
+        self.assertEqual(research.exit_code, 0, research.errors)
+        self.assertEqual(research.classification, "PASS")
+        self.assertTrue(research.to_dict()["research_eligible"])
+        self.assertTrue(research.details["derived_research_eligible"])
+        self.assertEqual(run_research.exit_code, 0, run_research.errors)
+        self.assertTrue(run_research.to_dict()["research_eligible"])
+        self.assertEqual(research.details["execution_mode"], "reference_ollama")
+        self.assertEqual(before, tree_hashes(batch))
+
+    def test_stale_false_and_unsupported_true_summaries_fail(self):
+        stale = self.copy_batch("stale-false")
+        make_synthetic_research_batch(stale)
+        stale_meta_path = stale / "batch_meta.json"
+        stale_manifest_path = stale / "batch_manifest.json"
+        stale_meta = self.read_json(stale_meta_path)
+        stale_manifest = self.read_json(stale_manifest_path)
+        stale_meta["research_eligible"] = False
+        stale_manifest["research_eligible"] = False
+        self.write_json(stale_manifest_path, stale_manifest)
+        stale_meta["batch_manifest_sha256"] = sha256_file(stale_manifest_path)
+        self.write_json(stale_meta_path, stale_meta)
+        stale_result = validate_batch_profile(stale, "research")
+        self.assertEqual(stale_result.exit_code, 3, stale_result.errors)
+        self.assertTrue(stale_result.details["derived_research_eligible"])
+        self.assertFalse(stale_result.to_dict()["research_eligible"])
+        self.assertTrue(
+            any("stale false summary" in error for error in stale_result.errors),
+            stale_result.errors,
+        )
+
+        unsupported = self.copy_batch("unsupported-true")
+        unsupported_meta_path = unsupported / "batch_meta.json"
+        unsupported_manifest_path = unsupported / "batch_manifest.json"
+        unsupported_meta = self.read_json(unsupported_meta_path)
+        unsupported_manifest = self.read_json(unsupported_manifest_path)
+        unsupported_meta["research_eligible"] = True
+        unsupported_manifest["research_eligible"] = True
+        self.write_json(unsupported_manifest_path, unsupported_manifest)
+        unsupported_meta["batch_manifest_sha256"] = sha256_file(
+            unsupported_manifest_path
+        )
+        self.write_json(unsupported_meta_path, unsupported_meta)
+        unsupported_result = validate_batch_profile(unsupported, "research")
+        self.assertEqual(unsupported_result.exit_code, 3, unsupported_result.errors)
+        self.assertFalse(unsupported_result.details["derived_research_eligible"])
+        self.assertFalse(unsupported_result.to_dict()["research_eligible"])
+        self.assertTrue(
+            any(
+                "unsupported true summary" in error
+                for error in unsupported_result.errors
+            ),
+            unsupported_result.errors,
+        )
+
+    def test_per_run_stale_false_summaries_do_not_demote_derivation(self):
+        batch = self.copy_batch("per-run-stale-false")
+        make_synthetic_research_batch(batch)
+        rows = self.read_rows(batch)
+        row = rows[0]
+        row["research_eligible"] = False
+        self.write_rows(batch, rows)
+
+        config_path = batch / row["config_path"]
+        config = self.read_json(config_path)
+        config["simulation"]["research_eligible"] = False
+        self.write_json(config_path, config)
+
+        run_dir = batch / "runs" / f"output_{row['run_id']}"
+        run_meta_path = run_dir / "run_meta.json"
+        run_meta = self.read_json(run_meta_path)
+        run_meta["config"]["simulation"]["research_eligible"] = False
+        self.write_json(run_meta_path, run_meta)
+
+        manifest_path = batch / "batch_manifest.json"
+        manifest = self.read_json(manifest_path)
+        manifest["runs"][0]["research_eligible"] = False
+        self.write_json(manifest_path, manifest)
+        self.refresh_integrity_evidence(batch)
+
+        selected_row = self.read_rows(batch)[0]
+        before = tree_hashes(batch)
+        batch_result = validate_batch_profile(batch, "research")
+        run_result = validate_run_profile(
+            run_dir, batch, selected_row, "research"
+        )
+        for report in (batch_result, run_result):
+            self.assertEqual(report.exit_code, 3, report.errors)
+            self.assertTrue(
+                report.details["derived_research_eligible"], report.errors
+            )
+            self.assertFalse(report.to_dict()["research_eligible"])
+            self.assertTrue(
+                any("stale false summary" in error for error in report.errors),
+                report.errors,
+            )
+        self.assertEqual(before, tree_hashes(batch))
+
+    def test_consistent_non_scripted_missing_only_approval_is_unverifiable(self):
+        batch = self.copy_batch("missing-approval")
+        make_synthetic_research_batch(batch, approval_present=False)
+        row = self.read_rows(batch)[0]
+        run_dir = batch / "runs" / f"output_{row['run_id']}"
+        before = tree_hashes(batch)
+        batch_result = validate_batch_profile(batch, "research")
+        run_result = validate_run_profile(run_dir, batch, row, "research")
+        for report in (batch_result, run_result):
+            self.assertEqual(report.exit_code, 2, report.errors)
+            self.assertEqual(report.classification, "UNVERIFIABLE")
+            self.assertFalse(report.details["derived_research_eligible"])
+            self.assertFalse(report.to_dict()["research_eligible"])
+            self.assertEqual(
+                report.unverified_research_requirements,
+                ["run-start approval reference is absent"],
+            )
+        self.assertEqual(before, tree_hashes(batch))
 
     def test_config_cell_policy_seed_and_planned_run_tampering_fail(self):
         mutations = (
@@ -425,6 +715,13 @@ class ResearchValidatorTests(unittest.TestCase):
             text=True,
             check=False,
         )
+        help_result = subprocess.run(
+            [sys.executable, "-m", "tools.research_validator", "--help"],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
         self.assertEqual(smoke.returncode, 0, smoke.stderr + smoke.stdout)
         self.assertEqual(research.returncode, 2, research.stderr + research.stdout)
         self.assertEqual(run_smoke.returncode, 0, run_smoke.stderr + run_smoke.stdout)
@@ -439,6 +736,9 @@ class ResearchValidatorTests(unittest.TestCase):
         )
         self.assertEqual(failed.returncode, 3, failed.stderr + failed.stdout)
         self.assertEqual(invocation.returncode, 64, invocation.stderr + invocation.stdout)
+        self.assertEqual(help_result.returncode, 0, help_result.stderr)
+        self.assertIn("usage:", help_result.stdout)
+        self.assertEqual(help_result.stderr, "")
 
 
 if __name__ == "__main__":

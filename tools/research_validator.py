@@ -53,6 +53,7 @@ MANIFEST_ROW_FIELDS = frozenset({
     "run_id",
     "cell_id",
     "replicate_id",
+    "execution_mode",
     "status",
     "config_path",
     "config_sha256",
@@ -67,6 +68,26 @@ MANIFEST_ROW_FIELDS = frozenset({
     "smoke_unverified_research_requirements",
     "research_eligible",
 })
+BATCH_MANIFEST_FIELDS = frozenset({
+    "schema_version",
+    "matrix_spec_version",
+    "matrix_id",
+    "status",
+    "execution_mode",
+    "research_eligible",
+    "plan_sha256",
+    "matrix_spec_sha256",
+    "base_config_sha256",
+    "prompt_sha256",
+    "plan_manifest_sha256",
+    "planned_runs",
+    "started_runs",
+    "completed_runs",
+    "failed_runs",
+    "aborted_runs",
+    "not_started_runs",
+    "runs",
+})
 
 
 @dataclass
@@ -77,6 +98,7 @@ class ValidationResult:
     unverified_research_requirements: List[str] = field(default_factory=list)
     strict_unverifiable: List[str] = field(default_factory=list)
     details: Dict[str, Any] = field(default_factory=dict)
+    derived_research_eligible: bool = False
 
     @property
     def exit_code(self) -> int:
@@ -99,8 +121,8 @@ class ValidationResult:
             "smoke_valid": not self.errors,
             "research_eligible": (
                 self.profile == "research"
+                and self.derived_research_eligible
                 and not self.errors
-                and not self.unverified_research_requirements
             ),
             "errors": self.errors,
             "unverified_research_requirements": (
@@ -215,7 +237,6 @@ def _validate_row_and_config(
         "edge_policy": edge_policy,
         "rotation_index": expected_replicate_index % 3,
         "execution_mode": execution_mode,
-        "research_eligible": False,
         "run_id": expected_run_id,
         "config_path": f"configs/{expected_run_id}.json",
         "prompt_sha256": prompt_sha256,
@@ -226,7 +247,6 @@ def _validate_row_and_config(
     for key, expected in expected_values.items():
         if row.get(key) != expected:
             _error(result, f"planned row {expected_run_id} has invalid {key}")
-
     if row.get("config_sha256") != compute_config_hash(config):
         _error(result, f"planned config hash mismatch for {expected_run_id}")
     try:
@@ -254,7 +274,6 @@ def _validate_row_and_config(
         "replicate_index": expected_replicate_index,
         "rotation_index": expected_replicate_index % 3,
         "execution_mode": execution_mode,
-        "research_eligible": False,
         "run_id": expected_run_id,
         "run_name": expected_run_id,
         "seed": replicate["world_seed"],
@@ -302,15 +321,19 @@ def _run_snapshot_simulation_value(run_meta: Dict[str, Any], key: str) -> Any:
 
 
 def _derive_execution_mode(
+    plan: Dict[str, Any],
     meta: Dict[str, Any],
     rows: Sequence[Dict[str, Any]],
     configs: Sequence[Dict[str, Any]],
     run_metas: Sequence[Dict[str, Any]],
     result: ValidationResult,
+    *,
+    batch_manifest: Optional[Dict[str, Any]] = None,
+    manifest_rows: Sequence[Dict[str, Any]] = (),
 ) -> Optional[str]:
-    """Return the one validated mode; persisted declarations cannot promote it."""
+    """Return the one mode unanimously recorded by every available layer."""
     evidence: List[Tuple[str, Any]] = [
-        ("batch metadata", meta.get("execution_mode")),
+        ("matrix plan", plan.get("execution_mode")),
     ]
     evidence.extend(
         (f"planned row {row.get('run_id')}", row.get("execution_mode"))
@@ -330,6 +353,18 @@ def _derive_execution_mode(
         )
         for run_meta in run_metas
     )
+    evidence.append(("batch metadata", meta.get("execution_mode")))
+    if batch_manifest is not None:
+        evidence.append(
+            ("batch manifest", batch_manifest.get("execution_mode"))
+        )
+    evidence.extend(
+        (
+            f"batch manifest run {manifest_row.get('run_id')}",
+            manifest_row.get("execution_mode"),
+        )
+        for manifest_row in manifest_rows
+    )
 
     valid_evidence: List[Tuple[str, str]] = []
     for label, value in evidence:
@@ -348,42 +383,80 @@ def _derive_execution_mode(
     return valid_evidence[0][1]
 
 
-def _validate_persisted_research_eligibility(
-    meta: Dict[str, Any],
-    rows: Sequence[Dict[str, Any]],
-    configs: Sequence[Dict[str, Any]],
-    run_metas: Sequence[Dict[str, Any]],
+def _derive_research_eligibility(
+    execution_mode: Optional[str],
+    complete: bool,
+    result: ValidationResult,
+    *,
+    all_runs_eligible: bool = True,
+) -> bool:
+    """Derive eligibility without consulting any persisted summary boolean."""
+    derived = (
+        execution_mode is not None
+        and execution_mode != "scripted_smoke"
+        and complete
+        and all_runs_eligible
+        and not result.errors
+        and not result.unverified_research_requirements
+    )
+    result.derived_research_eligible = derived
+    result.details["derived_research_eligible"] = derived
+    return derived
+
+
+def _compare_persisted_research_eligibility(
+    evidence: Sequence[Tuple[str, Any]],
+    derived: bool,
     result: ValidationResult,
 ) -> None:
-    """Validate Gate 3 declarations without using them to compute eligibility."""
-    evidence: List[Tuple[str, Any]] = [
-        ("batch metadata", meta.get("research_eligible")),
-    ]
-    evidence.extend(
-        (f"planned row {row.get('run_id')}", row.get("research_eligible"))
-        for row in rows
-    )
-    evidence.extend(
-        (
-            f"generated config {_simulation_value(config, 'run_id')}",
-            _simulation_value(config, "research_eligible"),
-        )
-        for config in configs
-    )
-    evidence.extend(
-        (
-            f"run metadata {run_meta.get('run_id')}",
-            _run_snapshot_simulation_value(run_meta, "research_eligible"),
-        )
-        for run_meta in run_metas
-    )
+    """Check summaries only after authoritative eligibility was derived."""
     for label, value in evidence:
-        if value is not False:
+        if not isinstance(value, bool):
             _error(
                 result,
-                f"{label} has non-false persisted research_eligible; "
-                "eligibility is validator-derived",
+                f"{label} has invalid persisted research_eligible summary",
             )
+        elif value != derived:
+            mismatch = (
+                "stale false summary"
+                if derived
+                else "unsupported true summary"
+            )
+            _error(
+                result,
+                f"{label} research_eligible contradicts derived eligibility: "
+                f"{mismatch}",
+            )
+
+
+def _per_run_eligibility_evidence(
+    row: Dict[str, Any],
+    config: Dict[str, Any],
+    run_meta: Optional[Dict[str, Any]],
+    manifest_row: Optional[Dict[str, Any]],
+) -> List[Tuple[str, Any]]:
+    run_id = row.get("run_id")
+    evidence: List[Tuple[str, Any]] = [
+        (f"planned row {run_id}", row.get("research_eligible")),
+        (
+            f"generated config {run_id}",
+            _simulation_value(config, "research_eligible"),
+        ),
+        (
+            f"run metadata {run_id}",
+            _run_snapshot_simulation_value(run_meta, "research_eligible")
+            if run_meta is not None
+            else None,
+        ),
+    ]
+    if manifest_row is not None:
+        evidence.append(
+            (
+                f"batch manifest run {run_id}",
+                manifest_row.get("research_eligible"),
+            )
+        )
+    return evidence
 
 
 def _research_requirements(
@@ -580,11 +653,57 @@ def _check_scripted_smoke_communication(
             _error(result, "scripted within-bloc cell has no same-bloc delivery")
 
 
+def _load_run_manifest_evidence(
+    batch_path: Path,
+    meta: Dict[str, Any],
+    row: Dict[str, Any],
+    result: ValidationResult,
+) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+    manifest_path = batch_path / "batch_manifest.json"
+    if not manifest_path.exists():
+        if meta.get("status") == "completed":
+            _error(result, "completed batch is missing batch_manifest.json")
+        return None, None
+    batch_manifest = _read_object(manifest_path, result)
+    if batch_manifest is None:
+        return None, None
+    if set(batch_manifest) != BATCH_MANIFEST_FIELDS:
+        _error(result, "batch manifest fields are not canonical")
+    if batch_manifest.get("schema_version") != BATCH_MANIFEST_VERSION:
+        _error(result, "batch manifest schema version mismatch")
+    if manifest_path.read_bytes() != canonical_json_bytes(batch_manifest) + b"\n":
+        _error(result, "batch_manifest.json is not canonical")
+    try:
+        manifest_sha = sha256_file(manifest_path)
+    except OSError:
+        manifest_sha = None
+    if meta.get("batch_manifest_sha256") != manifest_sha:
+        _error(result, "batch manifest file hash mismatch")
+    manifest_rows = batch_manifest.get("runs")
+    if not isinstance(manifest_rows, list):
+        _error(result, "batch manifest runs must be an array")
+        return batch_manifest, None
+    matches = [
+        value
+        for value in manifest_rows
+        if isinstance(value, dict) and value.get("run_id") == row.get("run_id")
+    ]
+    if len(matches) != 1:
+        _error(result, "batch manifest does not contain exactly one selected run")
+        return batch_manifest, None
+    manifest_row = matches[0]
+    if set(manifest_row) != MANIFEST_ROW_FIELDS:
+        _error(result, "selected batch manifest run fields are not canonical")
+    return batch_manifest, manifest_row
+
+
 def validate_run_profile(
     run_dir: Path | str,
     batch_dir: Path | str,
     row: Dict[str, Any],
     profile: str,
+    *,
+    _compare_persisted_summary: bool = True,
 ) -> ValidationResult:
     if profile not in {"smoke", "research"}:
         raise InvocationError("profile must be smoke or research")
@@ -597,6 +716,9 @@ def validate_run_profile(
     config = _read_object(config_path, result)
     if meta is None or plan is None or config is None:
         return result
+    batch_manifest, manifest_row = _load_run_manifest_evidence(
+        batch_path, meta, row, result
+    )
     try:
         validate_plan_data(plan)
         replicate_index = row.get("replicate_index")
@@ -613,7 +735,7 @@ def validate_run_profile(
             config,
             plan,
             meta.get("prompt_sha256"),
-            meta.get("execution_mode"),
+            plan.get("execution_mode"),
             replicate_index,
             cell_index,
             result,
@@ -627,10 +749,14 @@ def validate_run_profile(
     complete = run_meta is not None and run_meta.get("status") == "completed"
     run_metas = [run_meta] if run_meta is not None else []
     execution_mode = _derive_execution_mode(
-        meta, [row], [config], run_metas, result
-    )
-    _validate_persisted_research_eligibility(
-        meta, [row], [config], run_metas, result
+        plan,
+        meta,
+        [row],
+        [config],
+        run_metas,
+        result,
+        batch_manifest=batch_manifest,
+        manifest_rows=[manifest_row] if manifest_row is not None else [],
     )
     _research_requirements(
         meta,
@@ -640,6 +766,17 @@ def validate_run_profile(
         execution_mode,
         result,
     )
+    derived = _derive_research_eligibility(
+        execution_mode, complete, result
+    )
+    if _compare_persisted_summary:
+        _compare_persisted_research_eligibility(
+            _per_run_eligibility_evidence(
+                row, config, run_meta, manifest_row
+            ),
+            derived,
+            result,
+        )
     result.details.update({
         "run_id": row.get("run_id"),
         "edge_policy": row.get("edge_policy"),
@@ -722,7 +859,7 @@ def validate_batch_profile(
             config,
             plan,
             meta.get("prompt_sha256"),
-            meta.get("execution_mode"),
+            plan.get("execution_mode"),
             replicate_index,
             cell_index,
             result,
@@ -771,25 +908,7 @@ def validate_batch_profile(
         if len({row.get("initial_state_input_hash") for row in grouped}) != 1:
             _error(result, "initial-state input hashes differ")
 
-    expected_batch_manifest_fields = {
-        "schema_version",
-        "matrix_spec_version",
-        "matrix_id",
-        "status",
-        "plan_sha256",
-        "matrix_spec_sha256",
-        "base_config_sha256",
-        "prompt_sha256",
-        "plan_manifest_sha256",
-        "planned_runs",
-        "started_runs",
-        "completed_runs",
-        "failed_runs",
-        "aborted_runs",
-        "not_started_runs",
-        "runs",
-    }
-    if set(batch_manifest) != expected_batch_manifest_fields:
+    if set(batch_manifest) != BATCH_MANIFEST_FIELDS:
         _error(result, "batch manifest fields are not canonical")
     if (
         (batch_path / "batch_manifest.json").read_bytes()
@@ -832,6 +951,7 @@ def validate_batch_profile(
     if batch_manifest.get("schema_version") != BATCH_MANIFEST_VERSION:
         _error(result, "batch manifest schema version mismatch")
     for key in (
+        "matrix_spec_version",
         "matrix_id",
         "plan_sha256",
         "matrix_spec_sha256",
@@ -846,21 +966,31 @@ def validate_batch_profile(
     ):
         _error(result, "batch manifest file hash mismatch")
     run_metas: List[Dict[str, Any]] = []
+    run_eligibilities: Dict[str, bool] = {}
+    per_run_summary_checks: List[
+        Tuple[List[Tuple[str, Any]], bool]
+    ] = []
     for row in rows:
         run_id = row.get("run_id")
         manifest_row = manifest_by_run.get(run_id)
         if not isinstance(manifest_row, dict):
             _error(result, f"batch manifest lacks run {run_id}")
             continue
-        for key in ("ordinal", "run_id", "cell_id", "replicate_id", "config_path", "config_sha256"):
+        for key in (
+            "ordinal",
+            "run_id",
+            "cell_id",
+            "replicate_id",
+            "execution_mode",
+            "config_path",
+            "config_sha256",
+        ):
             if manifest_row.get(key) != row.get(key):
                 _error(result, f"batch manifest row {run_id} has invalid {key}")
         status = manifest_row.get("status")
         if status not in {"completed", "failed", "aborted", "not_started"}:
             _error(result, f"batch manifest row {run_id} has invalid status")
             continue
-        if manifest_row.get("research_eligible") is not False:
-            _error(result, f"batch manifest run {run_id} is incorrectly research eligible")
         run_dir = runs_dir / f"output_{run_id}"
         if status == "completed":
             config = config_by_run.get(run_id)
@@ -891,8 +1021,22 @@ def validate_batch_profile(
             if manifest_row.get("smoke_valid") is not True:
                 _error(result, f"completed run {run_id} lacks smoke PASS")
             smoke_result = validate_run_profile(
-                run_dir, batch_path, row, "smoke"
+                run_dir,
+                batch_path,
+                row,
+                "smoke",
+                _compare_persisted_summary=False,
             )
+            if isinstance(run_id, str):
+                run_eligibilities[run_id] = (
+                    smoke_result.derived_research_eligible
+                )
+            per_run_summary_checks.append((
+                _per_run_eligibility_evidence(
+                    row, config, run_meta, manifest_row
+                ),
+                smoke_result.derived_research_eligible,
+            ))
             for message in smoke_result.errors:
                 _error(result, f"smoke run validation: {message}")
             if manifest_row.get("smoke_errors") != smoke_result.errors:
@@ -902,8 +1046,28 @@ def validate_batch_profile(
                 != smoke_result.unverified_research_requirements
             ):
                 _error(result, f"stored smoke eligibility evidence mismatch for {run_id}")
-        elif status == "not_started" and run_dir.exists():
-            _error(result, f"not-started run directory exists for {run_id}")
+        else:
+            config = config_by_run.get(run_id)
+            evidence: List[Tuple[str, Any]] = [
+                (
+                    f"planned row {run_id}",
+                    row.get("research_eligible"),
+                ),
+                (
+                    f"batch manifest run {run_id}",
+                    manifest_row.get("research_eligible"),
+                ),
+            ]
+            if config is not None:
+                evidence.append(
+                    (
+                        f"generated config {run_id}",
+                        _simulation_value(config, "research_eligible"),
+                    )
+                )
+            per_run_summary_checks.append((evidence, False))
+            if status == "not_started" and run_dir.exists():
+                _error(result, f"not-started run directory exists for {run_id}")
 
     statuses = [
         row.get("status") for row in manifest_rows if isinstance(row, dict)
@@ -932,13 +1096,42 @@ def validate_batch_profile(
     if not complete:
         _error(result, "selected batch is not a completed smoke batch")
     execution_mode = _derive_execution_mode(
-        meta, rows, configs, run_metas, result
-    )
-    _validate_persisted_research_eligibility(
-        meta, rows, configs, run_metas, result
+        plan,
+        meta,
+        rows,
+        configs,
+        run_metas,
+        result,
+        batch_manifest=batch_manifest,
+        manifest_rows=manifest_rows,
     )
     _research_requirements(
         meta, configs, run_metas, complete, execution_mode, result
+    )
+    all_runs_eligible = (
+        len(run_eligibilities) == len(rows)
+        and all(run_eligibilities.values())
+    )
+    derived = _derive_research_eligibility(
+        execution_mode,
+        complete,
+        result,
+        all_runs_eligible=all_runs_eligible,
+    )
+    for evidence, run_derived in per_run_summary_checks:
+        _compare_persisted_research_eligibility(
+            evidence, run_derived, result
+        )
+    _compare_persisted_research_eligibility(
+        [
+            ("batch metadata", meta.get("research_eligible")),
+            (
+                "batch manifest",
+                batch_manifest.get("research_eligible"),
+            ),
+        ],
+        derived,
+        result,
     )
     result.strict_unverifiable = list(dict.fromkeys(result.strict_unverifiable))
     result.details.update({
@@ -998,6 +1191,10 @@ def _find_run_row(
 def main(argv: Optional[Sequence[str]] = None) -> int:
     try:
         args = build_parser().parse_args(argv)
+    except InvocationError as error:
+        print(f"ERROR: {error}", file=sys.stderr)
+        return 64
+    try:
         if args.command == "batch":
             result = validate_batch_profile(args.batch_dir, args.profile)
         else:
@@ -1008,9 +1205,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             result = validate_run_profile(
                 run_dir, batch_dir, row, args.profile
             )
-    except InvocationError as error:
-        print(f"ERROR: {error}", file=sys.stderr)
-        return 64
     except BaseException as error:
         if isinstance(error, KeyboardInterrupt):
             raise
