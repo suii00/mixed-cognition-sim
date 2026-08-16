@@ -422,19 +422,19 @@ manifest does not authorize or complete the unfrozen production analysis plan.
 | Transport-failure phase atomicity | Phase 1/3 blocked multi-request failures and multiple-error fixtures | All requests and telemetry settle; no primary log/state partial commit; deterministic minimum failing agent; executor threads release | Gate 2 targeted suite at `4f893b3...` | PASS at frozen `34c6b80...` |
 | Unexpected-worker-failure handling | Mixed transport/unexpected and multiple-unexpected fixtures | Unexpected error wins over transport, original type is re-raised, minimum unexpected agent fixes context, no partial commit or thread leak | Gate 2 targeted suite at `4f893b3...` | PASS at frozen `34c6b80...` |
 | Effective concurrency provenance | Omitted/explicit/invalid settings, caller-ownership, persisted snapshot, and config-hash fixtures | Effective positive integer is owned and persisted; invalid types/values rejected; different concurrency changes config hash | Gate 2 targeted suite at `4f893b3...` | PASS at frozen `34c6b80...` |
-| Communication edge-policy validation | Default/explicit/invalid config, backward-compatible full, within-bloc delivery, and recomputed-manifest tamper fixtures | Effective policy is owned, persisted, and hashed; full preserves the old boundary; within retains same-bloc and rejects cross-bloc delivery | `tests/test_communication_policy.py`; 5/5 PASS at `c782356...` | `<pending independent checker>` |
-| Fixed eight-cell generation | One-replicate canonical generation and exact cell/order fixtures | Exactly HET/QQQ/GGG/LLL × full/within in the normative eight-row order | `tests/test_eight_cell_runner.py`; implementation `c782356...` | `<pending independent checker>` |
-| HET model-to-bloc rotation | Replicate indices 0, 1, 2, and 3 plus homogeneous assignment fixtures | HET uses the fixed modulo-three rotation; QQQ/GGG/LLL use one slot for all blocs | `test_fixed_cells_rotations_homogeneous_and_paired_hashes` | `<pending independent checker>` |
-| Paired seed/config invariants | Eight generated configs, paired hashes, world-input hashes, and constructed initial positions | Seed, non-manipulated config, prompt hash, world inputs, and actual initial positions agree across each paired replicate | `test_paired_configs_produce_identical_initial_positions`; paired-hash assertions | `<pending independent checker>` |
-| Deterministic plan/config bundle | Same plan rendered under two temporary roots | Canonical plan, rows, configs, and plan manifest are byte-identical and contain no runtime path or timestamp | `test_static_bundle_is_byte_identical_across_roots` | `<pending independent checker>` |
-| Eight-cell scripted CPU smoke | 12 agents, one temporary replicate, deterministic no-network transport | 8/8 complete and strict/smoke valid; full has cross-bloc delivery; within has same-bloc and zero cross-bloc delivery | `test_eight_cell_smoke_manifest_policies_and_sequential_collision` | `<pending independent checker>` |
-| Batch manifest completeness | Successful and injected-failure batches | Every planned row, status, config/run/raw/validator evidence, and manifest pin is retained; incomplete batches never report completed | runner and research-validator targeted suites at `c782356...` | `<pending independent checker>` |
-| Batch collision/no-overwrite | Sequential byte-hash check and concurrent CLI process claim | Repeat transport calls remain zero and bytes unchanged; concurrent claims yield exactly one owner and one collision | sequential and concurrent collision fixtures | `<pending independent checker>` |
-| Smoke-profile run validation | Strict validation, assignment/policy/pairing checks, shared batch authority, read-only complete-tree hashes, and CLI exits | Valid scripted run/batch exits 0 with `research_eligible=false`; canonical batch contradictions and tampering exit 3 for both scopes | `tests/test_research_validator.py`; 18/18 PASS in 35.928 s at `88e462c...` | Prior FAILs retained; recheck of `88e462c...` PENDING |
-| Complete execution-mode evidence chain | Plan, planned row, config, saved run config, batch metadata, manifest top, manifest row, and validator-result fixtures with ordinary hashes recomputed | Plan is authoritative; every completed layer is present and unanimous; missing/invalid/conflicting evidence exits 3 | execution-mode propagation, seven-layer conflict, and seven-layer missing-field fixtures at `7b4b3e8...` | Prior Medium at `1cb5e870...`; recheck PENDING |
-| Research-profile fail-closed eligibility | Scripted control, zero-network synthetic positive control, approval-only and consistently-unfrozen controls, stale summaries, plan/metadata freeze conflict, and unselected invalid-run fixtures | Scripted and missing evidence exit 2; consistent synthetic logic exits 0/true; all contradictions exit 3; another required run can block the selected run | `tests/test_research_validator.py`; 18/18 PASS in 35.928 s at `88e462c...` | Prior Medium at `1cb5e870...` and High at `7257fcc...`; recheck PENDING |
-| Shared public run/batch research authority | Every planned run ID in positive, plan-freeze conflict, consistently-unfrozen, stale batch-summary, missing-approval, and unselected-invalid fixtures | Public run research PASS implies public batch research PASS; batch exit 3 never permits run exit 0; run eligibility is selected-run eligibility AND batch eligibility | shared `ValidatedBatchContext` regressions in `tests/test_research_validator.py`; all complete-tree before/after hashes equal | High finding at `7257fcc...` retained; recheck of `88e462c...` PENDING |
-| Research-validator process exits/help | Public batch/run CLI fixtures for exits 0/2/3/64, shared plan-freeze conflict, and top-level argparse help | Printed classification matches process exit; conflicting batch/run both exit 3; `--help` exits 0, writes stdout help, and leaves stderr empty | `test_cli_process_exit_codes_zero_two_three_and_sixty_four` at `88e462c...` | Prior Low at `1cb5e870...`; recheck PENDING |
+| Communication edge-policy validation | Default/explicit/invalid config, backward-compatible full, within-bloc delivery, and recomputed-manifest tamper fixtures | Effective policy is owned, persisted, and hashed; full preserves the old boundary; within retains same-bloc and rejects cross-bloc delivery | `tests/test_communication_policy.py`; 5/5 PASS at `c782356...` | PASS at frozen `24b1ceb...` |
+| Fixed eight-cell generation | One-replicate canonical generation and exact cell/order fixtures | Exactly HET/QQQ/GGG/LLL × full/within in the normative eight-row order | `tests/test_eight_cell_runner.py`; implementation `c782356...` | PASS at frozen `24b1ceb...` |
+| HET model-to-bloc rotation | Replicate indices 0, 1, 2, and 3 plus homogeneous assignment fixtures | HET uses the fixed modulo-three rotation; QQQ/GGG/LLL use one slot for all blocs | `test_fixed_cells_rotations_homogeneous_and_paired_hashes` | PASS at frozen `24b1ceb...` |
+| Paired seed/config invariants | Eight generated configs, paired hashes, world-input hashes, and constructed initial positions | Seed, non-manipulated config, prompt hash, world inputs, and actual initial positions agree across each paired replicate | `test_paired_configs_produce_identical_initial_positions`; paired-hash assertions | PASS at frozen `24b1ceb...` |
+| Deterministic plan/config bundle | Same plan rendered under two temporary roots | Canonical plan, rows, configs, and plan manifest are byte-identical and contain no runtime path or timestamp | `test_static_bundle_is_byte_identical_across_roots` | PASS at frozen `24b1ceb...` |
+| Eight-cell scripted CPU smoke | 12 agents, one temporary replicate, deterministic no-network transport | 8/8 complete and strict/smoke valid; full has cross-bloc delivery; within has same-bloc and zero cross-bloc delivery | `test_eight_cell_smoke_manifest_policies_and_sequential_collision` | PASS at frozen `24b1ceb...` |
+| Batch manifest completeness | Successful and injected-failure batches | Every planned row, status, config/run/raw/validator evidence, and manifest pin is retained; incomplete batches never report completed | runner and research-validator targeted suites at `c782356...` | PASS at frozen `24b1ceb...` |
+| Batch collision/no-overwrite | Sequential byte-hash check and concurrent CLI process claim | Repeat transport calls remain zero and bytes unchanged; concurrent claims yield exactly one owner and one collision | sequential and concurrent collision fixtures | PASS at frozen `24b1ceb...` |
+| Smoke-profile run validation | Strict validation, assignment/policy/pairing checks, shared batch authority, read-only complete-tree hashes, and CLI exits | Valid scripted run/batch exits 0 with `research_eligible=false`; canonical batch contradictions and tampering exit 3 for both scopes | `tests/test_research_validator.py`; 18/18 PASS in 37.473 s in independent QA | PASS at frozen `24b1ceb...`; prior FAILs retained |
+| Complete execution-mode evidence chain | Plan, planned row, config, saved run config, batch metadata, manifest top, manifest row, and validator-result fixtures with ordinary hashes recomputed | Plan is authoritative; every completed layer is present and unanimous; missing/invalid/conflicting evidence exits 3 | execution-mode propagation, seven-layer conflict, and seven-layer missing-field fixtures at `7b4b3e8...` | PASS at frozen `24b1ceb...`; prior Medium retained |
+| Research-profile fail-closed eligibility | Scripted control, zero-network synthetic positive control, approval-only and consistently-unfrozen controls, stale summaries, plan/metadata freeze conflict, and unselected invalid-run fixtures | Scripted and missing evidence exit 2; consistent synthetic logic exits 0/true; all contradictions exit 3; another required run can block the selected run | independent QA: 10 fixtures, all eight run IDs, 0 implication violations | PASS at frozen `24b1ceb...`; prior Medium/High retained |
+| Shared public run/batch research authority | Every planned run ID in positive, plan-freeze conflict, consistently-unfrozen, stale batch-summary, missing-approval, and unselected-invalid fixtures | Public run research PASS implies public batch research PASS; batch exit 3 never permits run exit 0; run eligibility is selected-run eligibility AND batch eligibility | independent QA: 187 read-only tree-hash checks, 0 changed trees, 0 network calls | PASS at frozen `24b1ceb...`; prior High retained |
+| Research-validator process exits/help | Public batch/run CLI fixtures for exits 0/2/3/64, shared plan-freeze conflict, and top-level argparse help | Printed classification matches process exit; conflicting batch/run both exit 3; `--help` exits 0, writes stdout help, and leaves stderr empty | independent QA process checks at `24b1ceb...` | PASS at frozen `24b1ceb...`; prior Low retained |
 
 - Gate 1 status: `PASS / FROZEN`.
 - Gate 1 frozen commit:
@@ -479,8 +479,10 @@ manifest does not authorize or complete the unfrozen production analysis plan.
   `docs/reviews/gate2_independent_qa_20260816.md`.
 - Gate 2 verification used no GPU, real LLM, Ollama/vLLM service, external
   network request, or research run.
-- Gate 3 corrected implementation candidate: local regression `PASS`; independent
-  recheck `PENDING`.
+- Gate 3 status: `PASS / FROZEN`.
+- Gate 3 frozen commit:
+  `24b1ceba917f9853779b788d5ccab88c9c227c7b`.
+- Gate 3 freeze tag: `gate3-frozen-20260816`.
 - Gate 3 original implementation commit:
   `c782356c596443b595f6383e568eea9e97ae1250`.
 - Gate 3 execution-evidence correction commit:
@@ -544,6 +546,20 @@ manifest does not authorize or complete the unfrozen production analysis plan.
 - Gate 3 CLI evidence includes process exits 0/2/3/64; normal
   `python -m tools.research_validator --help` exits 0 with help on stdout and
   empty stderr.
+- Gate 3 independent checker: `PASS` at
+  `24b1ceba917f9853779b788d5ccab88c9c227c7b`; full suite 170/170 PASS in
+  48.895 s unittest time (49.219 s wall), targeted research-validator suite
+  18/18 PASS in 37.473 s (37.745 s wall), `compileall` PASS, and
+  `git diff --check` PASS. Ten independent eight-run fixtures produced zero
+  run/batch implication violations, 187 read-only complete-tree checks produced
+  zero changed trees, and guarded `requests.post` count was zero. The full
+  report is retained at
+  `docs/reviews/gate3_independent_recheck_20260816.md`.
+- Gate 3 known non-blocking Low: matrix specification section 28 abbreviates
+  the plan schema as `eight-cell-plan-v1.1.0`; the canonical implementation,
+  artifacts, tests, and protocol use `eight-cell-matrix-plan-v1.1.0`. The
+  documentation-only correction is deferred until after the frozen tag and
+  requires a new specification hash for Gate 4 onward.
 - Gate 3 evidence boundary: the eight-cell smoke used only temporary plans,
   placeholder model profiles, paired test seed 1001, and a scripted CPU
   transport. It performed no GPU, real LLM, Ollama/vLLM service, external
@@ -565,16 +581,17 @@ manifest does not authorize or complete the unfrozen production analysis plan.
   failed plan/metadata authority or stale batch-summary checks. That SHA is not
   a freeze candidate. The supplied finding is retained at
   `docs/reviews/gate3_independent_recheck_run_batch_fail_20260816.md`.
-- Gate 3 corrected-candidate independent recheck for implementation
-  `88e462c9c079cc874023b4515082c976f0125752`: `PENDING`.
-- Gate 3 freeze: `NOT DONE`.
+- Gate 3 final independent recheck: `PASS` at audited candidate
+  `24b1ceba917f9853779b788d5ccab88c9c227c7b`. The non-blocking Low
+  documentation erratum is retained; no implementation or eligibility finding
+  remains open at Gate 3 freeze.
+- Gate 3 freeze: `PASS / FROZEN` at tag `gate3-frozen-20260816`.
 - Production candidate registry: `NOT YET FROZEN`.
 - Backend/model artifacts: `NOT YET FROZEN`.
 - Readiness verdict (`NOT READY` until every required gate has evidence):
-  `NOT READY`. Gates 1 and 2 are frozen. Gate 3 has a locally passing correction
-  pending independent recheck and freeze; production registry,
-  production model/backend artifacts, experimental values, pilot seeds, and
-  run-start approval remain outstanding.
+  `NOT READY`. Gates 1, 2, and 3 are frozen. Production registry, production
+  model/backend artifacts, experimental values, pilot seeds, and run-start
+  approval remain outstanding.
 - Pilot authorization: `NO`.
 - Approved run-start window: `NO`; explicit approval remains outstanding.
 
