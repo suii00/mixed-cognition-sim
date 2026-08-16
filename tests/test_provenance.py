@@ -26,16 +26,34 @@ from engine.provenance import (
 
 
 class FakeResponse:
-    def __init__(self, content, http_error=None):
-        self.content = content
+    def __init__(
+        self,
+        content,
+        http_error=None,
+        metadata=None,
+        status_code=200,
+        body_bytes=None,
+    ):
+        self.message_content = content
         self.http_error = http_error
+        self.status_code = status_code
+        self.envelope = {"message": {"content": self.message_content}}
+        if metadata is not None:
+            self.envelope.update(metadata)
+        self.content = (
+            body_bytes
+            if body_bytes is not None
+            else json.dumps(self.envelope, separators=(",", ":")).encode("utf-8")
+        )
+        self.json_call_count = 0
 
     def raise_for_status(self):
         if self.http_error is not None:
             raise self.http_error
 
     def json(self):
-        return {"message": {"content": self.content}}
+        self.json_call_count += 1
+        return self.envelope
 
 
 class RunIdentityTests(unittest.TestCase):
@@ -656,6 +674,177 @@ class LlmTelemetryTests(unittest.TestCase):
         self.assertEqual(events, ["http_attempt"])
         sleep.assert_not_called()
 
+    def test_native_payload_places_overrides_and_keep_alive_correctly(self):
+        response = FakeResponse('{"message":"ok"}')
+        with mock.patch(
+            "engine.llm_client.requests.post",
+            return_value=response,
+        ) as post:
+            result = call_ollama(
+                prompt="exact prompt",
+                model="qwen2.5:3b",
+                base_url="http://127.0.0.1:11440",
+                temperature=0.1,
+                max_tokens=77,
+                timeout_s=9,
+                llm_overrides={"num_ctx": 4096, "top_p": 0.8},
+                keep_alive=-1,
+            )
+
+        self.assertEqual(result[0], {"message": "ok"})
+        post.assert_called_once_with(
+            "http://127.0.0.1:11440/api/chat",
+            json={
+                "model": "qwen2.5:3b",
+                "messages": [{"role": "user", "content": "exact prompt"}],
+                "stream": False,
+                "options": {
+                    "temperature": 0.1,
+                    "num_predict": 77,
+                    "num_ctx": 4096,
+                    "top_p": 0.8,
+                },
+                "keep_alive": -1,
+            },
+            timeout=9,
+        )
+
+    def test_default_payload_still_omits_keep_alive(self):
+        with mock.patch(
+            "engine.llm_client.requests.post",
+            return_value=FakeResponse('{"message":"ok"}'),
+        ) as post:
+            call_ollama(
+                prompt="prompt",
+                model="model",
+                base_url="http://localhost:11434",
+            )
+
+        payload = post.call_args.kwargs["json"]
+        self.assertNotIn("keep_alive", payload)
+        self.assertEqual(
+            payload,
+            {
+                "model": "model",
+                "messages": [{"role": "user", "content": "prompt"}],
+                "stream": False,
+                "options": {"temperature": 0.2, "num_predict": 1024},
+            },
+        )
+
+    def test_response_observer_receives_owned_full_envelope(self):
+        response = FakeResponse(
+            '{"message":"ok"}',
+            metadata={
+                "model": "qwen2.5:3b",
+                "done": True,
+                "total_duration": 123,
+                "load_duration": 45,
+                "prompt_eval_count": 67,
+                "eval_count": 8,
+            },
+        )
+        observed = []
+        with mock.patch(
+            "engine.llm_client.requests.post",
+            return_value=response,
+        ):
+            result = call_ollama(
+                prompt="prompt",
+                model="qwen2.5:3b",
+                base_url="http://localhost:11434",
+                response_observer=observed.append,
+            )
+
+        self.assertEqual(result[0], {"message": "ok"})
+        self.assertEqual(observed, [response.envelope])
+        self.assertIsNot(observed[0], response.envelope)
+        self.assertIsNot(observed[0]["message"], response.envelope["message"])
+        self.assertEqual(response.json_call_count, 1)
+        observed[0]["message"]["content"] = "observer mutation"
+        self.assertEqual(
+            response.envelope["message"]["content"],
+            '{"message":"ok"}',
+        )
+
+    def test_http_response_observer_receives_exact_success_status_and_body(self):
+        body = b'{"wire":"body"}'
+        response = FakeResponse(
+            '{"message":"ok"}',
+            status_code=200,
+            body_bytes=body,
+        )
+        exchanges = []
+        with mock.patch(
+            "engine.llm_client.requests.post",
+            return_value=response,
+        ):
+            result = call_ollama(
+                prompt="prompt",
+                model="model",
+                base_url="http://localhost:11434",
+                http_response_observer=(
+                    lambda status, raw_body: exchanges.append((status, raw_body))
+                ),
+            )
+
+        self.assertEqual(result[0], {"message": "ok"})
+        self.assertEqual(exchanges, [(200, body)])
+
+    def test_parse_retry_http_observer_receives_each_success_response(self):
+        exchanges = []
+        first = FakeResponse("not json", status_code=200)
+        second = FakeResponse('{"message":"recovered"}', status_code=200)
+        with mock.patch(
+            "engine.llm_client.requests.post",
+            side_effect=[first, second],
+        ):
+            result = call_ollama(
+                prompt="prompt",
+                model="model",
+                base_url="http://localhost:11434",
+                http_response_observer=(
+                    lambda status, raw_body: exchanges.append((status, raw_body))
+                ),
+            )
+
+        self.assertEqual(result[0], {"message": "recovered"})
+        self.assertEqual(
+            exchanges,
+            [(200, first.content), (200, second.content)],
+        )
+
+    def test_http_error_is_observed_before_terminal_transport_error(self):
+        response = FakeResponse(
+            "unavailable",
+            status_code=503,
+            body_bytes=b'{"error":"unavailable"}',
+            http_error=requests.HTTPError("sensitive body"),
+        )
+        exchanges = []
+        events = []
+        with mock.patch(
+            "engine.llm_client.requests.post",
+            return_value=response,
+        ):
+            with self.assertRaises(LLMTransportError):
+                call_ollama(
+                    prompt="prompt",
+                    model="model",
+                    base_url="http://localhost:11434",
+                    telemetry=(
+                        lambda event, amount: events.extend([event] * amount)
+                    ),
+                    http_response_observer=(
+                        lambda status, raw_body: exchanges.append(
+                            (status, raw_body)
+                        )
+                    ),
+                )
+
+        self.assertEqual(exchanges, [(503, b'{"error":"unavailable"}')])
+        self.assertEqual(events, ["http_attempt", "transport_failure"])
+
     def test_transport_retries_count_each_attempt_and_failure(self):
         result, events, sleep = self._call([
             requests.ConnectionError("secret-1"),
@@ -699,6 +888,38 @@ class LlmTelemetryTests(unittest.TestCase):
         self.assertEqual(events.count("http_attempt"), 2)
         self.assertEqual(events.count("generation_retry"), 1)
         self.assertEqual(events.count("syntax_parse_attempt_failure"), 1)
+        sleep.assert_not_called()
+
+    def test_parse_retry_observer_receives_both_envelopes_once(self):
+        first = FakeResponse(
+            "not json",
+            metadata={"model": "model", "eval_count": 3},
+        )
+        second = FakeResponse(
+            '{"message":"recovered"}',
+            metadata={"model": "model", "eval_count": 4},
+        )
+        observed = []
+        with (
+            mock.patch(
+                "engine.llm_client.requests.post",
+                side_effect=[first, second],
+            ),
+            mock.patch("engine.llm_client.time.sleep") as sleep,
+        ):
+            result = call_ollama(
+                prompt="prompt",
+                model="model",
+                base_url="http://localhost:11434",
+                response_observer=observed.append,
+            )
+
+        self.assertEqual(result[0], {"message": "recovered"})
+        self.assertEqual(observed, [first.envelope, second.envelope])
+        self.assertIsNot(observed[0], first.envelope)
+        self.assertIsNot(observed[1], second.envelope)
+        self.assertEqual(first.json_call_count, 1)
+        self.assertEqual(second.json_call_count, 1)
         sleep.assert_not_called()
 
     def test_final_syntax_failure_counts_both_invalid_generations(self):
