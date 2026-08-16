@@ -154,8 +154,8 @@ Evidence class must be one of: `direct observation`, `mechanical derivation`,
   Phase 1 step-start position snapshot and the unchanged communication/place
   rule; delivery starts only after all Phase 1 results commit.
 - Gate 3 matrix/edge specification: `docs/EIGHT_CELL_MATRIX_SPEC.md`,
-  `eight-cell-matrix-v1.1.0`, SHA-256
-  `1523ee8ab109e9fc80e6c1a7bb548008e944ce5c64868a25e84f614cd9a4b872`.
+  `eight-cell-matrix-v1.1.1`, SHA-256
+  `96a4ddefbef7a7c9ab8d5a41cb6d438edd7a18b20c78e8154681ac9c61c44e5a`.
 - Effective edge policy: `agents.edge_policy` accepts exactly `full` or
   `within_bloc_only`, defaults effectively to `full`, is saved in the owned
   effective config, and contributes to the config hash. Legacy saved configs
@@ -430,10 +430,11 @@ manifest does not authorize or complete the unfrozen production analysis plan.
 | Eight-cell scripted CPU smoke | 12 agents, one temporary replicate, deterministic no-network transport | 8/8 complete and strict/smoke valid; full has cross-bloc delivery; within has same-bloc and zero cross-bloc delivery | `test_eight_cell_smoke_manifest_policies_and_sequential_collision` | `<pending independent checker>` |
 | Batch manifest completeness | Successful and injected-failure batches | Every planned row, status, config/run/raw/validator evidence, and manifest pin is retained; incomplete batches never report completed | runner and research-validator targeted suites at `c782356...` | `<pending independent checker>` |
 | Batch collision/no-overwrite | Sequential byte-hash check and concurrent CLI process claim | Repeat transport calls remain zero and bytes unchanged; concurrent claims yield exactly one owner and one collision | sequential and concurrent collision fixtures | `<pending independent checker>` |
-| Smoke-profile run validation | Strict validation, assignment/policy/pairing checks, read-only artifact hashes, and CLI exits | Valid scripted run/batch exits 0 with `research_eligible=false`; contradictions and tampering exit 3 | `tests/test_research_validator.py`; 14/14 PASS at `7b4b3e8...` | Prior FAILs retained; recheck of `7b4b3e8...` PENDING |
+| Smoke-profile run validation | Strict validation, assignment/policy/pairing checks, shared batch authority, read-only complete-tree hashes, and CLI exits | Valid scripted run/batch exits 0 with `research_eligible=false`; canonical batch contradictions and tampering exit 3 for both scopes | `tests/test_research_validator.py`; 18/18 PASS in 35.928 s at `88e462c...` | Prior FAILs retained; recheck of `88e462c...` PENDING |
 | Complete execution-mode evidence chain | Plan, planned row, config, saved run config, batch metadata, manifest top, manifest row, and validator-result fixtures with ordinary hashes recomputed | Plan is authoritative; every completed layer is present and unanimous; missing/invalid/conflicting evidence exits 3 | execution-mode propagation, seven-layer conflict, and seven-layer missing-field fixtures at `7b4b3e8...` | Prior Medium at `1cb5e870...`; recheck PENDING |
-| Research-profile fail-closed eligibility | Scripted control, zero-network synthetic positive control, approval-only missing evidence, stale-false, unsupported-true, and per-run summary-order fixtures | Scripted research exits 2; consistent synthetic logic exits 0/true; missing evidence exits 2; persisted summaries cannot promote or demote derivation and either mismatch exits 3 | `tests/test_research_validator.py`; 14/14 PASS in 14.479 s at `7b4b3e8...` | Prior Medium at `1cb5e870...`; recheck PENDING |
-| Research-validator process exits/help | Public batch/run CLI fixtures for exits 0/2/3/64 and top-level argparse help | Printed classification matches process exit; `--help` exits 0, writes stdout help, and leaves stderr empty | `test_cli_process_exit_codes_zero_two_three_and_sixty_four` at `7b4b3e8...` | Prior Low at `1cb5e870...`; recheck PENDING |
+| Research-profile fail-closed eligibility | Scripted control, zero-network synthetic positive control, approval-only and consistently-unfrozen controls, stale summaries, plan/metadata freeze conflict, and unselected invalid-run fixtures | Scripted and missing evidence exit 2; consistent synthetic logic exits 0/true; all contradictions exit 3; another required run can block the selected run | `tests/test_research_validator.py`; 18/18 PASS in 35.928 s at `88e462c...` | Prior Medium at `1cb5e870...` and High at `7257fcc...`; recheck PENDING |
+| Shared public run/batch research authority | Every planned run ID in positive, plan-freeze conflict, consistently-unfrozen, stale batch-summary, missing-approval, and unselected-invalid fixtures | Public run research PASS implies public batch research PASS; batch exit 3 never permits run exit 0; run eligibility is selected-run eligibility AND batch eligibility | shared `ValidatedBatchContext` regressions in `tests/test_research_validator.py`; all complete-tree before/after hashes equal | High finding at `7257fcc...` retained; recheck of `88e462c...` PENDING |
+| Research-validator process exits/help | Public batch/run CLI fixtures for exits 0/2/3/64, shared plan-freeze conflict, and top-level argparse help | Printed classification matches process exit; conflicting batch/run both exit 3; `--help` exits 0, writes stdout help, and leaves stderr empty | `test_cli_process_exit_codes_zero_two_three_and_sixty_four` at `88e462c...` | Prior Low at `1cb5e870...`; recheck PENDING |
 
 - Gate 1 status: `PASS / FROZEN`.
 - Gate 1 frozen commit:
@@ -486,10 +487,12 @@ manifest does not authorize or complete the unfrozen production analysis plan.
   `6e1d13e3313e0bf35537db5352df61e261e8417e`.
 - Gate 3 complete execution-chain and eligibility-consistency correction commit:
   `7b4b3e8d6bf9b45f71ece624b04053f32bcfaefb`.
+- Gate 3 shared run/batch eligibility correction commit:
+  `88e462c9c079cc874023b4515082c976f0125752`.
 - Gate 3 specification: `docs/EIGHT_CELL_MATRIX_SPEC.md`,
-  `eight-cell-matrix-v1.1.0`, SHA-256
-  `1523ee8ab109e9fc80e6c1a7bb548008e944ce5c64868a25e84f614cd9a4b872`.
-- Gate 3 schema family at the correction: matrix plan
+  `eight-cell-matrix-v1.1.1`, SHA-256
+  `96a4ddefbef7a7c9ab8d5a41cb6d438edd7a18b20c78e8154681ac9c61c44e5a`.
+- Gate 3 schema family at the current correction remains: matrix plan
   `eight-cell-matrix-plan-v1.1.0`; batch manifest
   `eight-cell-batch-manifest-v1.1.0`.
 - Gate 3 pre-correction baseline at `1cb5e870...`: full suite 160/160 PASS in
@@ -504,6 +507,17 @@ manifest does not authorize or complete the unfrozen production analysis plan.
   (1.356936 s wall); full suite 166/166 PASS in 24.317 s (24.831845 s wall).
   `compileall`, `git diff --check`, and starting-SHA protected-path comparisons
   PASS.
+- Gate 3 shared-authority correction baseline at `7257fcc...`: full suite
+  166/166 PASS in 25.391 s unittest time (25.9575131 s wall), `compileall`
+  PASS, `git diff --check` PASS, and clean worktree.
+- Gate 3 shared-authority correction evidence at `88e462c...`:
+  research-validator suite 18/18 PASS in 35.928 s; eight-cell runner suite
+  11/11 PASS in 5.494 s (6.017487 s wall); communication-policy suite 5/5
+  PASS in 0.299 s (0.799805 s wall); Phase-Preserving Parallelism suite 19/19
+  PASS in 0.550 s (1.137919 s wall); Metric v2 suite 39/39 PASS in 5.251 s
+  (5.674729 s wall); strict-validator suite 17/17 PASS in 0.813 s
+  (1.333270 s wall); full suite 170/170 PASS in 47.572 s. `compileall`,
+  `git diff --check`, and Gate 0--2 protected-path comparisons PASS.
 - Gate 3 execution-mode evidence now covers plan, planned rows, generated
   configs, saved run configs, batch metadata, batch-manifest top level,
   batch-manifest run rows, and per-run/batch validator results. The plan is the
@@ -514,6 +528,19 @@ manifest does not authorize or complete the unfrozen production analysis plan.
   only approval exits 2. The fully positive `reference_ollama` fixture exits 0
   with derived/persisted true only as a synthetic validator-logic control; it
   performs no backend or network call and is not research evidence.
+- Gate 3 public run and batch reports now construct the same read-only validated
+  batch authority context. It binds the plan, rows, configs, batch metadata,
+  batch manifest, every planned run, cross-layer authority findings, derived
+  per-run eligibility, derived batch eligibility, and persisted summaries. A
+  public run's effective eligibility is its selected-run eligibility AND the
+  enclosing batch eligibility.
+- Gate 3 shared-authority regressions mechanically observed: plan versus
+  metadata registry/backend freeze conflicts yield exit 3 for the batch and
+  every selected run; consistently not-frozen evidence yields exit 2 for both;
+  stale batch-metadata and batch-manifest top summaries yield exit 3 for every
+  run; an invalid unselected run blocks an otherwise individually eligible
+  selected run. Every validation leaves the complete fixture tree byte-
+  identical, and guarded `requests.post` call count is zero.
 - Gate 3 CLI evidence includes process exits 0/2/3/64; normal
   `python -m tools.research_validator --help` exits 0 with help on stdout and
   empty stderr.
@@ -532,8 +559,14 @@ manifest does not authorize or complete the unfrozen production analysis plan.
   persisted/derived eligibility inconsistency (Medium), plus argparse help
   exit 64 (Low). That SHA is not a freeze candidate. The full report is retained
   at `docs/reviews/gate3_independent_recheck_fail_20260816.md`.
+- Gate 3 second corrected-candidate independent recheck: `FAIL` at audited
+  candidate `7257fccda2f4f744d71225429f6a3f7542230af7`. The High finding was that
+  public run validation could return research PASS while the enclosing batch
+  failed plan/metadata authority or stale batch-summary checks. That SHA is not
+  a freeze candidate. The supplied finding is retained at
+  `docs/reviews/gate3_independent_recheck_run_batch_fail_20260816.md`.
 - Gate 3 corrected-candidate independent recheck for implementation
-  `7b4b3e8d6bf9b45f71ece624b04053f32bcfaefb`: `PENDING`.
+  `88e462c9c079cc874023b4515082c976f0125752`: `PENDING`.
 - Gate 3 freeze: `NOT DONE`.
 - Production candidate registry: `NOT YET FROZEN`.
 - Backend/model artifacts: `NOT YET FROZEN`.
