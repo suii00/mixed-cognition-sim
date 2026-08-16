@@ -1,6 +1,6 @@
 # Eight-Cell Matrix Specification
 
-Version: `eight-cell-matrix-v1.0.0`
+Version: `eight-cell-matrix-v1.0.1`
 
 ## 1. Scope
 
@@ -127,6 +127,11 @@ metric, research eligibility, and effective edge policy. Execution-affecting
 defaults are explicit. Generated configs are canonical JSON and immutable after
 publication.
 
+The execution mode in `batch_meta.json`, every planned row, every generated
+config, and every completed run's saved config snapshot is one evidence chain.
+All values must be recognized and identical. The validator reports only this
+unanimous derived value; an invalid or conflicting value is a contradiction.
+
 ## 16. Permitted config differences
 
 Within a replicate, only run ID/name, cell ID, model condition, rotation,
@@ -195,6 +200,14 @@ not research eligible and supplies no behavioral evidence. Missing registry,
 backend, model artifact, source-cleanliness, protocol-freeze, plan-freeze, or
 run-start-approval evidence remains explicitly unverified.
 
+Research eligibility is computed only from validated underlying evidence. The
+persisted `research_eligible` fields in Gate 3 batch metadata, planned rows,
+generated configs, saved run config snapshots, and batch-manifest rows must be
+false and are never inputs that can promote a result. A consistently
+`scripted_smoke` run or batch under the research profile is `UNVERIFIABLE`; a
+cross-layer execution-mode conflict is `FAIL` even if summary or manifest hashes
+have been recomputed.
+
 ## 26. Research validator profiles
 
 The `smoke` profile requires structural, strict-run, pairing, assignment,
@@ -258,4 +271,6 @@ paired hashes and initial positions; byte-identical static bundles; sequential
 and concurrent collision; eight-cell smoke with network guard; success and
 failure manifests; failed/aborted/not-started retention; validator exits
 0/2/3/64; config/cell/policy/run-ID/seed/manifest/extra/missing/cross-edge
-tampering; and raw-run byte immutability.
+tampering; cross-layer execution-mode agreement; non-authoritative persisted
+research-eligibility declarations; recomputed-manifest mismatch attacks;
+run/batch CLI classification agreement; and raw-run byte immutability.

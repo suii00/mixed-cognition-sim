@@ -20,6 +20,7 @@ from tools.eight_cell_core import (
     BATCH_MANIFEST_VERSION,
     CANONICAL_BLOCS,
     CELL_DEFINITIONS,
+    EXECUTION_MODES,
     HEX64_RE,
     MATRIX_SPEC_VERSION,
     MODEL_PROFILE_FIELDS,
@@ -191,6 +192,7 @@ def _validate_row_and_config(
     config: Dict[str, Any],
     plan: Dict[str, Any],
     prompt_sha256: Any,
+    execution_mode: Any,
     expected_replicate_index: int,
     expected_cell_index: int,
     result: ValidationResult,
@@ -212,7 +214,7 @@ def _validate_row_and_config(
         "model_condition": condition,
         "edge_policy": edge_policy,
         "rotation_index": expected_replicate_index % 3,
-        "execution_mode": "scripted_smoke",
+        "execution_mode": execution_mode,
         "research_eligible": False,
         "run_id": expected_run_id,
         "config_path": f"configs/{expected_run_id}.json",
@@ -251,7 +253,7 @@ def _validate_row_and_config(
         "replicate_id": replicate["replicate_id"],
         "replicate_index": expected_replicate_index,
         "rotation_index": expected_replicate_index % 3,
-        "execution_mode": "scripted_smoke",
+        "execution_mode": execution_mode,
         "research_eligible": False,
         "run_id": expected_run_id,
         "run_name": expected_run_id,
@@ -286,11 +288,110 @@ def _validate_row_and_config(
                 )
 
 
+def _simulation_value(config: Any, key: str) -> Any:
+    if not isinstance(config, dict):
+        return None
+    simulation = config.get("simulation")
+    if not isinstance(simulation, dict):
+        return None
+    return simulation.get(key)
+
+
+def _run_snapshot_simulation_value(run_meta: Dict[str, Any], key: str) -> Any:
+    return _simulation_value(run_meta.get("config"), key)
+
+
+def _derive_execution_mode(
+    meta: Dict[str, Any],
+    rows: Sequence[Dict[str, Any]],
+    configs: Sequence[Dict[str, Any]],
+    run_metas: Sequence[Dict[str, Any]],
+    result: ValidationResult,
+) -> Optional[str]:
+    """Return the one validated mode; persisted declarations cannot promote it."""
+    evidence: List[Tuple[str, Any]] = [
+        ("batch metadata", meta.get("execution_mode")),
+    ]
+    evidence.extend(
+        (f"planned row {row.get('run_id')}", row.get("execution_mode"))
+        for row in rows
+    )
+    evidence.extend(
+        (
+            f"generated config {_simulation_value(config, 'run_id')}",
+            _simulation_value(config, "execution_mode"),
+        )
+        for config in configs
+    )
+    evidence.extend(
+        (
+            f"run metadata {run_meta.get('run_id')}",
+            _run_snapshot_simulation_value(run_meta, "execution_mode"),
+        )
+        for run_meta in run_metas
+    )
+
+    valid_evidence: List[Tuple[str, str]] = []
+    for label, value in evidence:
+        if not isinstance(value, str) or value not in EXECUTION_MODES:
+            _error(result, f"{label} has invalid execution_mode")
+            continue
+        valid_evidence.append((label, value))
+    modes = {value for _, value in valid_evidence}
+    if len(modes) != 1 or len(valid_evidence) != len(evidence):
+        if len(modes) > 1:
+            conflicting = ", ".join(
+                f"{label}={value}" for label, value in valid_evidence
+            )
+            _error(result, f"execution_mode conflict across evidence: {conflicting}")
+        return None
+    return valid_evidence[0][1]
+
+
+def _validate_persisted_research_eligibility(
+    meta: Dict[str, Any],
+    rows: Sequence[Dict[str, Any]],
+    configs: Sequence[Dict[str, Any]],
+    run_metas: Sequence[Dict[str, Any]],
+    result: ValidationResult,
+) -> None:
+    """Validate Gate 3 declarations without using them to compute eligibility."""
+    evidence: List[Tuple[str, Any]] = [
+        ("batch metadata", meta.get("research_eligible")),
+    ]
+    evidence.extend(
+        (f"planned row {row.get('run_id')}", row.get("research_eligible"))
+        for row in rows
+    )
+    evidence.extend(
+        (
+            f"generated config {_simulation_value(config, 'run_id')}",
+            _simulation_value(config, "research_eligible"),
+        )
+        for config in configs
+    )
+    evidence.extend(
+        (
+            f"run metadata {run_meta.get('run_id')}",
+            _run_snapshot_simulation_value(run_meta, "research_eligible"),
+        )
+        for run_meta in run_metas
+    )
+    for label, value in evidence:
+        if value is not False:
+            _error(
+                result,
+                f"{label} has non-false persisted research_eligible; "
+                "eligibility is validator-derived",
+            )
+
+
 def _research_requirements(
     meta: Dict[str, Any],
     configs: List[Dict[str, Any]],
     run_metas: List[Dict[str, Any]],
     complete: bool,
+    execution_mode: Optional[str],
     result: ValidationResult,
 ) -> None:
     if meta.get("source_git_probe_status") != "available":
@@ -312,7 +413,7 @@ def _research_requirements(
         for run_meta in run_metas
     ):
         _error(result, "run git probe status contradicts batch provenance")
-    if meta.get("execution_mode") == "scripted_smoke":
+    if execution_mode == "scripted_smoke":
         _unverified(result, "execution mode is scripted_smoke")
     backend = meta.get("backend_freeze")
     if not isinstance(backend, dict) or backend.get("status") != "frozen":
@@ -512,6 +613,7 @@ def validate_run_profile(
             config,
             plan,
             meta.get("prompt_sha256"),
+            meta.get("execution_mode"),
             replicate_index,
             cell_index,
             result,
@@ -523,17 +625,25 @@ def validate_run_profile(
     )
     _check_scripted_smoke_communication(run_path, row, config, result)
     complete = run_meta is not None and run_meta.get("status") == "completed"
+    run_metas = [run_meta] if run_meta is not None else []
+    execution_mode = _derive_execution_mode(
+        meta, [row], [config], run_metas, result
+    )
+    _validate_persisted_research_eligibility(
+        meta, [row], [config], run_metas, result
+    )
     _research_requirements(
         meta,
         [config],
-        [run_meta] if run_meta is not None else [],
+        run_metas,
         complete,
+        execution_mode,
         result,
     )
     result.details.update({
         "run_id": row.get("run_id"),
         "edge_policy": row.get("edge_policy"),
-        "execution_mode": row.get("execution_mode"),
+        "execution_mode": execution_mode,
     })
     return result
 
@@ -612,6 +722,7 @@ def validate_batch_profile(
             config,
             plan,
             meta.get("prompt_sha256"),
+            meta.get("execution_mode"),
             replicate_index,
             cell_index,
             result,
@@ -748,6 +859,8 @@ def validate_batch_profile(
         if status not in {"completed", "failed", "aborted", "not_started"}:
             _error(result, f"batch manifest row {run_id} has invalid status")
             continue
+        if manifest_row.get("research_eligible") is not False:
+            _error(result, f"batch manifest run {run_id} is incorrectly research eligible")
         run_dir = runs_dir / f"output_{run_id}"
         if status == "completed":
             config = config_by_run.get(run_id)
@@ -789,8 +902,6 @@ def validate_batch_profile(
                 != smoke_result.unverified_research_requirements
             ):
                 _error(result, f"stored smoke eligibility evidence mismatch for {run_id}")
-            if manifest_row.get("research_eligible") is not False:
-                _error(result, f"smoke run {run_id} is incorrectly research eligible")
         elif status == "not_started" and run_dir.exists():
             _error(result, f"not-started run directory exists for {run_id}")
 
@@ -820,13 +931,21 @@ def validate_batch_profile(
     )
     if not complete:
         _error(result, "selected batch is not a completed smoke batch")
-    _research_requirements(meta, configs, run_metas, complete, result)
+    execution_mode = _derive_execution_mode(
+        meta, rows, configs, run_metas, result
+    )
+    _validate_persisted_research_eligibility(
+        meta, rows, configs, run_metas, result
+    )
+    _research_requirements(
+        meta, configs, run_metas, complete, execution_mode, result
+    )
     result.strict_unverifiable = list(dict.fromkeys(result.strict_unverifiable))
     result.details.update({
         "matrix_id": plan.get("matrix_id"),
         "planned_runs": len(rows),
         "completed_runs": counts["completed_runs"],
-        "execution_mode": meta.get("execution_mode"),
+        "execution_mode": execution_mode,
     })
     return result
 

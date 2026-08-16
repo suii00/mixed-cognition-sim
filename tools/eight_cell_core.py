@@ -27,10 +27,11 @@ from engine.provenance import (
 
 
 PLAN_SCHEMA_VERSION = "eight-cell-matrix-plan-v1.0.0"
-MATRIX_SPEC_VERSION = "eight-cell-matrix-v1.0.0"
+MATRIX_SPEC_VERSION = "eight-cell-matrix-v1.0.1"
 PLAN_MANIFEST_VERSION = "eight-cell-plan-manifest-v1.0.0"
 BATCH_MANIFEST_VERSION = "eight-cell-batch-manifest-v1.0.0"
 METRIC_VERSION = "metric-v2.0.0"
+EXECUTION_MODES = frozenset({"scripted_smoke", "reference_ollama"})
 CANONICAL_BLOCS = ("alpha", "beta", "neutral")
 MODEL_SLOTS = ("qwen", "gemma", "llama")
 MODEL_PROFILE_FIELDS = frozenset({
@@ -448,7 +449,7 @@ def build_bundle(
     execution_mode: str = "scripted_smoke",
 ) -> MatrixBundle:
     spec_sha = _require_hex64(matrix_spec_sha256, "matrix spec SHA-256")
-    if execution_mode not in {"scripted_smoke", "reference_ollama"}:
+    if execution_mode not in EXECUTION_MODES:
         raise PlanValidationError("invalid execution_mode")
     root = (repo_root or Path(__file__).resolve().parents[1]).resolve()
     prompt_sha = compute_prompt_hash(root)
