@@ -1,6 +1,6 @@
 # Gate 4 Backend Evidence Ledger
 
-Version: `gate4-backend-evidence-ledger-v1.2.0`
+Version: `gate4-backend-evidence-ledger-v1.3.0`
 
 Status: `WORKING CANDIDATE INDEX — NOT A BACKEND FREEZE`
 
@@ -346,12 +346,69 @@ backend evidence and does not authorize another GPU run.
   fail-closed. The generic publisher cannot label arbitrary raw data PASS,
   FAIL, ABORTED, or warning-free.
 
-The structural publisher is therefore a CPU-tested candidate, but the GPU
-workflow is not yet publication-ready. Before endpoint reuse or another model
-request, a versioned workload-specific validator must derive its operational
-result and warnings from raw bytes, and the workload orchestrator must validate
-the exact approval before the first GPU workload, bind its hash into
-capture-start metadata, and compare actual call count, elapsed time, and GPU
-UUIDs with the approved limits. None of those missing integrations may be
-inferred from the standalone publisher. Endpoint reuse, 12-agent cells, and
-the eight-cell smoke remain unexecuted after the prompt6 candidate.
+The structural publisher is therefore a CPU-tested candidate. It does not by
+itself authorize or classify a backend workload. The endpoint-reuse content
+layer now has the separate CPU implementation record in section 5; its real
+workload remains unexecuted and unapproved. Twelve-agent reference cells and
+the eight-cell smoke also remain unexecuted after the prompt6 candidate.
+
+## 5. Endpoint-reuse implementation readiness
+
+This section is implementation/test evidence only. It is not an Ollama,
+NVIDIA, model, residency, endpoint-reuse, or cleanup observation.
+
+- Implementation commit:
+  `9828aea5de25f4f9262ad2d04192937ea1d2c1f4`.
+- Workload contract:
+  `docs/GATE4_OLLAMA_ENDPOINT_REUSE_SPEC.md`, version
+  `gate4-ollama-endpoint-reuse-v1.0.0`, SHA-256
+  `c7b945181502b070b67c9ece6c6f646e4ce058c20098bdbddbb36e5e760771af`.
+- Approval-bound orchestrator:
+  `tools/gate4_endpoint_reuse_orchestrator.py`, SHA-256
+  `82e4f3ac3163a576a51d68e43f3461c4efa150f032afefd0a8699aeeabeb05b1`.
+- Independent workload validator:
+  `tools/validate_gate4_ollama_endpoint_reuse.py`, SHA-256
+  `83dd1a77dbf842955f7fee5c5163d1809212ace35b4599726e3b2ed8e63108e5`;
+  it does not import the orchestrator and its validation path performs no
+  Ollama, NVIDIA, sudo, or network action.
+- Synthetic CPU result: `13/13 PASS` for the endpoint-reuse suite and
+  `256/256 PASS` for the complete repository suite at the pre-documentation
+  implementation tree. `compileall` and `git diff --check` also passed.
+- GPU/network/process boundary: no real HTTP request, Ollama request, NVIDIA
+  query, sudo call, temporary server start, process signal, or GPU workload was
+  performed by this implementation verification.
+
+The closed approval has exactly two CLI inputs: the canonical approval path
+and its mandatory SHA-256. It fixes clean source SHA, implementation/spec
+hashes, exact ports/models/digests/UUIDs, six-generation budget, wall/request/
+cleanup/stability bounds, warning allowlist, existing-service PID, output root,
+and stop conditions. Workload settings have no CLI override.
+
+The synthetic positive fixture completes a three-agent, one-step
+`Simulation.run()` with three Phase 1 calls, three between-phase unloads,
+three Phase 3 reload calls, a post-wait three-endpoint stability snapshot,
+strict run validation, effective cleanup, workload validation, generic staging
+validation, atomic generic publication, independent S/I/R verification, and
+published-byte workload revalidation. The generic summary remains
+`operational_backend_result=NOT_EVALUATED`; only the separate workload report
+may derive `PASS` or `PASS_WITH_WARNINGS`, and every outcome retains
+`gate4_formal_pass=false`, `research_eligible=false`, and
+`backend_freeze.status=not_frozen`.
+
+Negative CPU fixtures cover approval/hash/source/endpoint/budget rejection,
+HTTP/retry/parse/unload/placement/stability/cleanup failures, unknown warnings,
+interruption, collision, publication failure, and verification failure. The
+real backend code additionally requires loopback-only UUID-pinned temporary
+servers, exact endpoint-local model artifacts, direct API/CLI/GPU/process
+binding, unchanged port-11434 PID/start-time/version state, and exact-PID TERM
+cleanup without `systemctl`, shutdown, reboot, broad kill, or automatic
+SIGKILL escalation.
+
+The implementation is a CPU readiness candidate, not a backend result or
+formal freeze. Its injected backend fixtures do not establish that the live
+sudo policy, Ollama 0.32.13 API responses, process ancestry, NVIDIA rows,
+warning behavior, exact-PID cleanup, or stability timing will satisfy the
+contract. No endpoint-reuse approval artifact or execution approval exists at
+this ledger version. A future real attempt requires a new explicit approval
+that names the then-clean HEAD and exact bounded envelope; creating this record
+does not grant that approval.

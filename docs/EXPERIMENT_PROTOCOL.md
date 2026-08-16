@@ -90,17 +90,18 @@ Evidence class must be one of: `direct observation`, `mechanical derivation`,
   unchanged across paired cells but its production value is not yet frozen.
 - Runtime/backend/checkpoint policy: Gate 3 executed only a no-network scripted
   CPU transport and made no backend/model claim. Gate 4 scope-limited Ollama
-  capacity evidence and one auxiliary current-prompt smoke now exist, while
-  formal Gate 4A reference evidence is `IN PROGRESS / NOT YET FROZEN`; Gate 4B
-  vLLM work is
+  capacity evidence and one auxiliary current-prompt smoke now exist. A later
+  endpoint-reuse orchestrator/validator exists only as a synthetic CPU-tested
+  implementation candidate with no run approval. Formal Gate 4A reference
+  evidence is `IN PROGRESS / NOT YET FROZEN`; Gate 4B vLLM work is
   `DEFERRED / BLOCKED ON OLLAMA EVIDENCE FREEZE`.
 - Gate 4 backend-smoke specification:
   `docs/GATE4_BACKEND_SMOKE_SPEC.md`, `gate4-backend-smoke-v1.0.0`, SHA-256
   `e0d55545b57a42b1e6c28c31a137f3f19e1413e4078cfb2851e1a47f009d2065`.
 - Gate 4 candidate-evidence index:
   `docs/GATE4_BACKEND_EVIDENCE_LEDGER.md`,
-  `gate4-backend-evidence-ledger-v1.2.0`, SHA-256
-  `c2295d75391d1e40af8a1234d8f9037410e3506e6024e6f92675098f635780c3`.
+  `gate4-backend-evidence-ledger-v1.3.0`, SHA-256
+  `a3b9d45d852d7f34e06a808e52e4aca40c0ae35cd76b4ea109470ae330ef2479`.
 - Gate 4 evidence-publication contract:
   `docs/GATE4_EVIDENCE_PUBLICATION_SPEC.md`,
   `gate4-backend-evidence-publication-v1.0.0`, SHA-256
@@ -109,6 +110,10 @@ Evidence class must be one of: `direct observation`, `mechanical derivation`,
   `docs/GATE4A_FP16_THREE_ENDPOINT_PROMPT_SMOKE_SPEC.md`,
   `gate4a-fp16-three-endpoint-prompt-smoke-v1.0.0`, SHA-256
   `0e24765e78b858a0cbf27e6f66a0cc745aa188c3fb52ab1dafa51559352c6cee`.
+- FP16 three-endpoint endpoint-reuse specification:
+  `docs/GATE4_OLLAMA_ENDPOINT_REUSE_SPEC.md`,
+  `gate4-ollama-endpoint-reuse-v1.0.0`, SHA-256
+  `c7b945181502b070b67c9ece6c6f646e4ce058c20098bdbddbb36e5e760771af`.
 - Prompt contains no bloc/model/self-or-other model identity: confirmed by the
   unchanged prompt hash; edge policy is applied structurally during delivery.
 - Prompt contains no desired result, qualitative evaluation, optimization target,
@@ -237,6 +242,16 @@ Evidence class must be one of: `direct observation`, `mechanical derivation`,
   evidence publication. It is not a formal Gate 4A stage; the 12-agent QQQ,
   GGG, LLL, and HET reference cells, eight-cell smoke, and independent
   reference-backend freeze remain incomplete.
+- Gate 4 auxiliary endpoint reuse: a closed-schema, approval-bound CPU
+  implementation candidate now exists at commit
+  `9828aea5de25f4f9262ad2d04192937ea1d2c1f4`. Its synthetic workload uses one
+  complete three-agent, one-step `Simulation.run()`, unloads the three models
+  between Phase 1 and Phase 3, performs exactly six generation calls, waits the
+  approved stability interval, and revalidates content on publisher staging and
+  published bytes. This is implementation evidence only: no endpoint-reuse
+  approval artifact exists and no real HTTP, Ollama, NVIDIA, sudo, process, or
+  GPU action was performed. A live result may not be inferred from the CPU
+  fixture.
 - Gate 4B vLLM transport/API contract: deferred until Gate 4A evidence freeze.
   Its planned provider/transport/endpoint contract is `vllm`,
   `openai_compatible`, and `/v1/chat/completions`; no vLLM conformance or runtime
@@ -659,9 +674,19 @@ manifest does not authorize or complete the unfrozen production analysis plan.
   for the generic atomic publisher and an independently implemented S/I/R
   verifier. The generic profile is fail-closed at
   `operational_backend_result=NOT_EVALUATED` and cannot promote arbitrary raw
-  evidence. This is not GPU authorization: a workload-specific content
-  validator plus pre-workload approval/hash/limit integration in the
-  orchestrator remain mandatory before endpoint reuse or another model call.
+  evidence. This remains a structural component, not GPU authorization or a
+  backend result.
+- Gate 4 endpoint-reuse implementation: `CPU SYNTHETIC PASS — 13/13`, commit
+  `9828aea5de25f4f9262ad2d04192937ea1d2c1f4`; the full repository suite passed
+  `256/256`. The closed approval schema, workload validator, approval-bound
+  orchestrator, six-call state machine, stability check, cleanup checks,
+  publisher staging hook, independent S/I/R verification, and published-byte
+  workload revalidation are implemented. Those tests injected a CPU backend
+  and prohibited real network/process/GPU work. They do not validate the live
+  sudo policy, Ollama API shape, NVIDIA/process ancestry, endpoint stability,
+  warning behavior, or cleanup outcome. Endpoint-reuse execution approval is
+  `NO`, no approval artifact has been created, and no live endpoint-reuse
+  request has run.
 - Gate 4A formal result: `NOT PASSED / NOT FROZEN`; work status remains
   `IN PROGRESS`. Gate 4A-1 through Gate 4A-4 and the independent Ollama
   reference-backend evidence freeze remain outstanding. No 12-agent reference
