@@ -158,6 +158,14 @@ Before any GPU or endpoint action, the orchestrator must verify:
 - the generation budget is exactly six and the three endpoints are exact;
 - no attempt directory, final bundle, or receipt already owns the approval ID.
 
+Repository and evidence paths are lexical absolute paths. Missing evidence
+components are created without following symlinks; every existing component
+is opened from `/` with `O_DIRECTORY|O_NOFOLLOW`. Pinned descriptors for the
+repository, attempt/publication/receipt roots, and exclusively created attempt
+remain live through validation and publication. A symbolic-link component or
+a later device/inode mismatch fails closed. Linux descriptor-relative and
+no-follow operations are required by this v1.1 contract.
+
 The real backend preflight then saves and checks:
 
 - `nvidia-smi -L`, GPU state, and compute applications;
@@ -264,7 +272,8 @@ effective config, transcript, every generation-attempt record, six successful
 request/response records, native envelopes, unload responses, per-call and
 post-wait stability snapshots, raw API/CLI/GPU/process observations, warning
 log, Simulation run directory, strict report, cleanup observation, terminal
-result, and workload-validation report. Every owned JSON file is canonical and
+result, workload-validation report, and non-self-referential validation
+commitment. Every owned JSON file is canonical and
 every artifact is written exclusively. Failed, aborted, cleanup-failed,
 publication-failed, and verification-failed outcomes remain bound to their
 unique attempt/receipt paths.
@@ -278,9 +287,9 @@ reason, and no suppression.
 
 ## 7. Workload validator acceptance
 
-The validator is read-only except for one new exclusive
-`workload-validation.json` output. It independently recomputes the approval
-hash, validates all indexed artifact hashes, and requires:
+The validator derivation is pure and read-only: it never trusts an existing
+`workload-validation.json`. It independently recomputes the approval hash,
+validates all indexed artifact hashes, and requires:
 
 ```text
 generation calls = 6 exactly
@@ -307,13 +316,27 @@ unexpected eviction occurs. After `stability_wait_seconds`, a second reload
 snapshot must retain the same server and runner PID, digest, context, placement,
 and UUID.
 
-Cleanup passes only when temporary models, runners, server PIDs, and ports are
-absent; selected GPUs return to utilization zero, no compute process, and
-memory at or below the approved threshold; the existing port 11434 PID and
-process start time, command, and version are unchanged and its `/api/ps` is
-empty. The orchestrator unloads only test-owned models and sends SIGTERM only
-to a revalidated exact temporary server PID. It does not escalate automatically
-to SIGKILL. The orchestrator never calls
+Cleanup uses explicit booleans, never error-string matching:
+
+```text
+backend_cleanup_passed
+final_unloads_complete
+temporary_ports_closed
+temporary_server_pids_absent
+temporary_runner_pids_absent
+all_gpus_idle
+no_compute_processes
+existing_service_unchanged
+```
+
+`checks.cleanup=PASS` only when all eight are true. Every final unload must
+have HTTP 200, `done=true`, `done_reason=unload`, and an empty post-unload model
+set. Temporary models, runners, server PIDs, and ports must be absent; selected
+GPUs must return to utilization zero and the approved idle-memory threshold;
+no compute process may remain; and the existing port 11434 PID, process start
+time, command, version, and empty `/api/ps` must be unchanged. The orchestrator
+unloads only test-owned models and sends SIGTERM only to a revalidated exact
+temporary server PID. It does not escalate automatically to SIGKILL. It never calls
 `systemctl`, `service`, `shutdown`, or `reboot`, and never stops PID 373012 or
 any approved existing-service PID.
 
@@ -339,7 +362,22 @@ orchestrator-transcript.jsonl
 artifact-index.json
 orchestrator-result.json
 workload-validation.json
+workload-validation-commitment.json
 ```
+
+After pure derivation, the orchestrator exclusively writes canonical
+`workload-validation.json`. A separate canonical commitment records its exact
+SHA-256, operational result, publication eligibility, fixed Gate/research
+boundaries, and original source-attempt `{device,inode}`. The workload artifact
+index excludes those two files to avoid self-reference; the generic capture
+manifest, generic inventory, and S/I/R include both exact files.
+
+At the source attempt, publisher staging, and published final bundle, the
+orchestrator rederives the workload value and requires exact equality with the
+persisted canonical bytes and committed SHA, including operational result,
+publication eligibility, and fixed Gate/research boundaries. The value retains
+the original source identity while each pass separately verifies the currently
+opened source, staging, or final identity.
 
 The generic summary remains structure-only and cannot copy the workload PASS
 into `operational_backend_result`. The workload validator is rerun read-only on
@@ -352,9 +390,19 @@ external receipt to record `evidence_verified`. Publication and verification
 exceptions instead receive `publication_failed` or `verification_failed`
 external terminal receipts without formal promotion.
 
+The publisher receives exact expected source and publication-root identities;
+its receipt returns the source and final published-directory identities. The
+standalone verifier independently reopens the lexical final path without
+publisher imports and requires that final identity in addition to S/I/R. Final
+workload revalidation requires the same identity. A successful external
+receipt records both identities plus `workload_validation_sha256`,
+`workload_operational_backend_result`, and
+`workload_publication_eligible` from the matching final validation.
+
 Partial attempts are never published. An existing attempt, final bundle,
 receipt, approval ID, or evidence bundle ID causes a collision; it is never
-overwritten or resumed.
+overwritten or resumed. A concurrent loser receives the controlled
+endpoint-reuse collision classification, never raw `FileExistsError`.
 
 ## 9. Required CPU tests before approval
 
@@ -372,6 +420,11 @@ GPU, Ollama, sudo, and network access. They must cover:
   seventh generation before backend invocation, and early Phase 3 rejection
   before any unload;
 - attempt/final/receipt collision and partial-publication rejection;
+- persisted-validation mutation at source, staging, and final; reverse
+  persisted-PASS versus recomputed-FAIL; source/final alternate-inode
+  replacement; symlink roots/components; and parent-component identity drift;
+- every cleanup subcheck, including final unload `done=false`, and a concurrent
+  claim race with exactly one controlled collision;
 - one successful six-call fixture through workload validation, generic
   staging validation, publication, independent S/I/R verification, and final
   workload revalidation; exact unload payload and exact-PID TERM tests; and

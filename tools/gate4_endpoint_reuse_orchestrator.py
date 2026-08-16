@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import contextlib
 import copy
 import hashlib
 import json
@@ -35,6 +36,12 @@ from engine.provenance import compute_config_hash, sha256_bytes, utc_now_iso
 from engine.sim import Simulation
 from tools import gate4_evidence_publisher as publisher
 from tools import verify_gate4_evidence_bundle as independent_verifier
+from tools.gate4_fs_identity import (
+    DirectoryIdentity,
+    Gate4FilesystemIdentityError,
+    ensure_directory,
+    pin_directory,
+)
 from tools.validate_gate4_ollama_endpoint_reuse import (
     APPROVAL_FILENAME,
     APPROVAL_SHA_FILENAME,
@@ -53,17 +60,20 @@ from tools.validate_gate4_ollama_endpoint_reuse import (
     SPEC_VERSION,
     TRANSCRIPT_FILENAME,
     VALIDATION_FILENAME,
+    VALIDATION_COMMITMENT_FILENAME,
     canonical_json_bytes,
     decode_canonical_json,
     publisher_approval_projection,
     validate_approval,
     validate_attempt,
+    validate_persisted_validation,
+    write_validation_commitment,
     write_validation_report,
 )
 from tools.validate_run import validate_run
 
 
-RECEIPT_SCHEMA_VERSION = "gate4-ollama-endpoint-reuse-receipt-v1.0.0"
+RECEIPT_SCHEMA_VERSION = "gate4-ollama-endpoint-reuse-receipt-v1.1.0"
 CAPTURE_START_SCHEMA_VERSION = "gate4-ollama-endpoint-reuse-capture-start-v1.0.0"
 METRIC_VERSION = "backend-smoke-observation-v1.0.0"
 
@@ -156,6 +166,9 @@ class OrchestrationReceipt:
     receipt_path: Optional[Path]
     operational_backend_result: str
     publication_verified: bool
+    workload_validation_sha256: Optional[str] = None
+    source_directory_identity: Optional[DirectoryIdentity] = None
+    final_directory_identity: Optional[DirectoryIdentity] = None
 
 
 def _sha256(data: bytes) -> str:
@@ -172,6 +185,28 @@ def _write_exclusive(path: Path, data: bytes) -> None:
 
 def _write_json(path: Path, value: Any) -> None:
     _write_exclusive(path, canonical_json_bytes(value))
+
+
+def _write_json_at(directory_fd: int, name: str, value: Any) -> None:
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    try:
+        descriptor = os.open(name, flags, 0o644, dir_fd=directory_fd)
+    except FileExistsError as error:
+        raise EndpointReuseCollisionError(
+            f"receipt already exists: {name}"
+        ) from error
+    try:
+        data = canonical_json_bytes(value)
+        offset = 0
+        while offset < len(data):
+            offset += os.write(descriptor, data[offset:])
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def _stable_read(path: Path, context: str) -> bytes:
@@ -894,7 +929,11 @@ class ReuseTransport:
 def _artifact_index(root: Path) -> Dict[str, Any]:
     files: Dict[str, Any] = {}
     for path in sorted(root.rglob("*")):
-        if not path.is_file() or path.name in {INDEX_FILENAME, VALIDATION_FILENAME}:
+        if not path.is_file() or path.name in {
+            INDEX_FILENAME,
+            VALIDATION_FILENAME,
+            VALIDATION_COMMITMENT_FILENAME,
+        }:
             continue
         relative = path.relative_to(root).as_posix()
         data = _stable_read(path, relative)
@@ -952,7 +991,41 @@ def run_approved_endpoint_reuse(
     sleep_fn: Callable[[float], None] = time.sleep,
     monotonic_fn: Callable[[], float] = time.monotonic,
 ) -> OrchestrationReceipt:
-    repo = (repository or Path(__file__).resolve().parents[1]).resolve()
+    with contextlib.ExitStack() as pin_stack:
+        return _run_approved_endpoint_reuse(
+            approval_path,
+            approval_sha256,
+            repository=repository,
+            backend=backend,
+            source_probe=source_probe,
+            sleep_fn=sleep_fn,
+            monotonic_fn=monotonic_fn,
+            pin_stack=pin_stack,
+        )
+
+
+def _run_approved_endpoint_reuse(
+    approval_path: Path | str,
+    approval_sha256: str,
+    *,
+    repository: Optional[Path],
+    backend: Optional[EndpointBackend],
+    source_probe: Callable[[Path], SourceState],
+    sleep_fn: Callable[[float], None],
+    monotonic_fn: Callable[[], float],
+    pin_stack: contextlib.ExitStack,
+) -> OrchestrationReceipt:
+    repo = Path(
+        os.path.abspath(
+            os.fspath(repository or Path(__file__).absolute().parents[1])
+        )
+    )
+    try:
+        repository_pin = pin_stack.enter_context(
+            pin_directory(repo, "orchestrator repository")
+        )
+    except Gate4FilesystemIdentityError as error:
+        raise EndpointReuseInvocationError(str(error)) from error
     approval, approval_bytes, observed_approval_sha = load_approval(
         approval_path,
         approval_sha256,
@@ -963,6 +1036,7 @@ def run_approved_endpoint_reuse(
         repo,
         source_probe=source_probe,
     )
+    repository_pin.assert_path_identity()
     evidence_root = Path(approval["evidence_root"])
     attempts_root = evidence_root / "attempts"
     publication_root = evidence_root / "published"
@@ -970,18 +1044,50 @@ def run_approved_endpoint_reuse(
     attempt = attempts_root / approval["approval_id"]
     final = publication_root / approval["evidence_bundle_id"]
     receipt_path = receipts_root / f"{approval['approval_id']}.json"
-    evidence_root.mkdir(parents=True, exist_ok=True)
-    attempts_root.mkdir(mode=0o755, exist_ok=True)
-    publication_root.mkdir(mode=0o755, exist_ok=True)
-    receipts_root.mkdir(mode=0o755, exist_ok=True)
-    for path, label in (
-        (attempt, "attempt"),
-        (final, "final bundle"),
-        (receipt_path, "receipt"),
+    try:
+        ensure_directory(evidence_root, "endpoint-reuse evidence root")
+        ensure_directory(attempts_root, "endpoint-reuse attempts root")
+        ensure_directory(publication_root, "endpoint-reuse publication root")
+        ensure_directory(receipts_root, "endpoint-reuse receipts root")
+        attempts_pin = pin_stack.enter_context(
+            pin_directory(attempts_root, "endpoint-reuse attempts root")
+        )
+        publication_pin = pin_stack.enter_context(
+            pin_directory(publication_root, "endpoint-reuse publication root")
+        )
+        receipts_pin = pin_stack.enter_context(
+            pin_directory(receipts_root, "endpoint-reuse receipts root")
+        )
+    except Gate4FilesystemIdentityError as error:
+        raise EndpointReuseInvocationError(str(error)) from error
+
+    def entry_exists(directory_fd: int, name: str) -> bool:
+        try:
+            os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return False
+        return True
+
+    for directory_fd, name, path, label in (
+        (attempts_pin.fd, approval["approval_id"], attempt, "attempt"),
+        (publication_pin.fd, approval["evidence_bundle_id"], final, "final bundle"),
+        (receipts_pin.fd, receipt_path.name, receipt_path, "receipt"),
     ):
-        if os.path.lexists(path):
+        if entry_exists(directory_fd, name):
             raise EndpointReuseCollisionError(f"{label} already exists: {path}")
-    attempt.mkdir(mode=0o755, exist_ok=False)
+    try:
+        os.mkdir(approval["approval_id"], 0o755, dir_fd=attempts_pin.fd)
+    except FileExistsError as error:
+        raise EndpointReuseCollisionError(
+            f"attempt already exists: {attempt}"
+        ) from error
+    try:
+        attempt_pin = pin_stack.enter_context(
+            pin_directory(attempt, "endpoint-reuse attempt")
+        )
+    except Gate4FilesystemIdentityError as error:
+        raise EndpointReuseInvocationError(str(error)) from error
+    attempt_identity = attempt_pin.identity
     _write_exclusive(attempt / APPROVAL_FILENAME, approval_bytes)
     _write_exclusive(
         attempt / APPROVAL_SHA_FILENAME,
@@ -1175,11 +1281,27 @@ def run_approved_endpoint_reuse(
     }
     _write_json(attempt / RESULT_FILENAME, result)
     _write_json(attempt / INDEX_FILENAME, _artifact_index(attempt))
+    attempt_pin.assert_path_identity()
     validation = validate_attempt(
         attempt,
         expected_approval_sha256=observed_approval_sha,
+        expected_directory_identity=attempt_identity.as_dict(),
+        source_directory_identity=attempt_identity.as_dict(),
     )
     write_validation_report(attempt / VALIDATION_FILENAME, validation)
+    write_validation_commitment(
+        attempt / VALIDATION_COMMITMENT_FILENAME,
+        validation,
+    )
+    attempt_pin.assert_path_identity()
+    persisted_validation = validate_persisted_validation(
+        attempt,
+        expected_approval_sha256=observed_approval_sha,
+        expected_directory_identity=attempt_identity.as_dict(),
+        source_directory_identity=attempt_identity.as_dict(),
+    )
+    validation = persisted_validation.report
+    workload_validation_sha256 = persisted_validation.sha256
     if not validation.publication_eligible:
         return OrchestrationReceipt(
             approval_id=approval["approval_id"],
@@ -1188,6 +1310,8 @@ def run_approved_endpoint_reuse(
             receipt_path=None,
             operational_backend_result=validation.operational_backend_result,
             publication_verified=False,
+            workload_validation_sha256=workload_validation_sha256,
+            source_directory_identity=attempt_identity,
         )
 
     def publication_failure_receipt(
@@ -1204,46 +1328,89 @@ def run_approved_endpoint_reuse(
             "status": state,
             "failure_type": type(error).__name__,
             "failure_message": str(error)[:1000],
-            "operational_backend_result": validation.operational_backend_result,
+            "operational_backend_result": "FAIL",
+            "source_workload_operational_backend_result": (
+                validation.operational_backend_result
+            ),
             "publication_conforming": False,
             "workload_revalidated": False,
+            "workload_validation_sha256": workload_validation_sha256,
+            "workload_operational_backend_result": "NOT_VERIFIED",
+            "workload_publication_eligible": False,
+            "source_directory_identity": attempt_identity.as_dict(),
+            "final_directory_identity": None,
             "final_path": str(observed_final) if observed_final is not None else None,
             "gate4_formal_pass": False,
             "research_eligible": False,
             "backend_freeze": {"status": "not_frozen"},
         }
-        _write_json(receipt_path, failure_value)
+        receipts_pin.assert_path_identity()
+        _write_json_at(receipts_pin.fd, receipt_path.name, failure_value)
+        receipts_pin.assert_path_identity()
         return OrchestrationReceipt(
             approval_id=approval["approval_id"],
             attempt_path=attempt,
             final_path=observed_final,
             receipt_path=receipt_path,
-            operational_backend_result=validation.operational_backend_result,
+            operational_backend_result="FAIL",
             publication_verified=False,
+            workload_validation_sha256=workload_validation_sha256,
+            source_directory_identity=attempt_identity,
         )
 
     def staged_workload_check(checkpoint: str, staging: Path, _final: Path) -> None:
         if checkpoint != "after_inventory_verification_before_publish":
             return
-        staged_validation = validate_attempt(
+        try:
+            with pin_directory(staging, "publisher staging workload") as staging_pin:
+                staging_identity = staging_pin.identity
+        except Gate4FilesystemIdentityError as error:
+            raise EndpointReuseExecutionError(str(error)) from error
+        staged_persisted = validate_persisted_validation(
             staging,
             expected_approval_sha256=observed_approval_sha,
+            expected_directory_identity=staging_identity.as_dict(),
+            source_directory_identity=attempt_identity.as_dict(),
         )
         if (
-            not staged_validation.publication_eligible
-            or staged_validation.value != validation.value
+            not staged_persisted.report.publication_eligible
+            or staged_persisted.report.value != validation.value
+            or staged_persisted.sha256 != workload_validation_sha256
         ):
             raise EndpointReuseExecutionError(
                 "staged workload validation differs from approved attempt"
             )
 
     try:
+        attempt_pin.assert_path_identity()
+        publication_pin.assert_path_identity()
+        receipts_pin.assert_path_identity()
         publication_receipt = publisher.publish_evidence(
             attempt,
             publication_root,
             _summary_draft(approval),
             checkpoint_hook=staged_workload_check,
+            expected_source_identity=attempt_identity.as_dict(),
+            expected_publication_root_identity=(
+                publication_pin.identity.as_dict()
+            ),
         )
+        publication_pin.assert_path_identity()
+        attempt_pin.assert_path_identity()
+        final_pin = pin_stack.enter_context(
+            pin_directory(
+                publication_receipt.final_path,
+                "published endpoint-reuse evidence",
+            )
+        )
+        if final_pin.identity.as_dict() != (
+            publication_receipt.final_directory_identity.as_dict()
+        ):
+            raise EndpointReuseExecutionError(
+                "published directory identity differs from publisher receipt"
+            )
+    except publisher.EvidenceCollisionError as error:
+        raise EndpointReuseCollisionError(str(error)) from error
     except Exception as error:
         observed_final = final if final.is_dir() and not final.is_symlink() else None
         return publication_failure_receipt(
@@ -1255,23 +1422,33 @@ def run_approved_endpoint_reuse(
             expected_summary_sha256=publication_receipt.summary_sha256,
             expected_inventory_sha256=publication_receipt.inventory_sha256,
             expected_bundle_root_sha256=publication_receipt.bundle_root_sha256,
+            expected_final_identity=(
+                publication_receipt.final_directory_identity.as_dict()
+            ),
         )
         if not verified.valid:
             raise EndpointReuseExecutionError(
                 "independent publication verification failed: "
                 + ";".join(verified.errors)
             )
-        final_workload_validation = validate_attempt(
+        final_pin.assert_path_identity()
+        final_persisted_validation = validate_persisted_validation(
             publication_receipt.final_path,
             expected_approval_sha256=observed_approval_sha,
+            expected_directory_identity=(
+                publication_receipt.final_directory_identity.as_dict()
+            ),
+            source_directory_identity=attempt_identity.as_dict(),
         )
         if (
-            not final_workload_validation.publication_eligible
-            or final_workload_validation.value != validation.value
+            not final_persisted_validation.report.publication_eligible
+            or final_persisted_validation.report.value != validation.value
+            or final_persisted_validation.sha256 != workload_validation_sha256
         ):
             raise EndpointReuseExecutionError(
                 "published workload validation differs from approved attempt"
             )
+        final_pin.assert_path_identity()
     except Exception as error:
         return publication_failure_receipt(
             "verification_failed",
@@ -1295,11 +1472,29 @@ def run_approved_endpoint_reuse(
         "final_path": str(publication_receipt.final_path),
         "publication_conforming": True,
         "workload_revalidated": True,
+        "workload_validation_sha256": final_persisted_validation.sha256,
+        "workload_operational_backend_result": (
+            final_persisted_validation.report.operational_backend_result
+        ),
+        "workload_publication_eligible": (
+            final_persisted_validation.report.publication_eligible
+        ),
+        "source_directory_identity": (
+            publication_receipt.source_directory_identity.as_dict()
+            if publication_receipt.source_directory_identity is not None
+            else None
+        ),
+        "final_directory_identity": (
+            publication_receipt.final_directory_identity.as_dict()
+        ),
         "gate4_formal_pass": False,
         "research_eligible": False,
         "backend_freeze": {"status": "not_frozen"},
     }
-    _write_json(receipt_path, receipt_value)
+    final_pin.assert_path_identity()
+    receipts_pin.assert_path_identity()
+    _write_json_at(receipts_pin.fd, receipt_path.name, receipt_value)
+    receipts_pin.assert_path_identity()
     return OrchestrationReceipt(
         approval_id=approval["approval_id"],
         attempt_path=attempt,
@@ -1307,6 +1502,9 @@ def run_approved_endpoint_reuse(
         receipt_path=receipt_path,
         operational_backend_result=validation.operational_backend_result,
         publication_verified=True,
+        workload_validation_sha256=final_persisted_validation.sha256,
+        source_directory_identity=publication_receipt.source_directory_identity,
+        final_directory_identity=publication_receipt.final_directory_identity,
     )
 
 
@@ -1960,8 +2158,20 @@ class LocalOllamaBackend:
             "version": existing_version.get("version") if existing_status == 200 else None,
             "ps_models": existing_ps.get("models") if ps_status == 200 else None,
         }
+        ordered_final_unloads = list(reversed(final_unloads))
+        final_unloads_complete = (
+            len(ordered_final_unloads) == len(approval["endpoints"])
+            and all(
+                unload.get("status_code") == 200
+                and unload.get("done") is True
+                and unload.get("done_reason") == "unload"
+                and unload.get("ps_models_after") == []
+                for unload in ordered_final_unloads
+            )
+        )
         passed = (
             not errors
+            and final_unloads_complete
             and closed == ports
             and len(absent) == len(cleanup_servers)
             and len(gpu_idle) == 8
@@ -1986,7 +2196,7 @@ class LocalOllamaBackend:
             "temporary_runner_pids_absent": not gpu["compute_rows"],
             "gpu_idle": gpu_idle,
             "existing_service": existing,
-            "final_unloads": list(reversed(final_unloads)),
+            "final_unloads": ordered_final_unloads,
             "termination_commands": termination_commands,
             "prohibited_operations": [],
         }

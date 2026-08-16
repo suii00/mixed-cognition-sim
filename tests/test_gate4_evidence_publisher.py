@@ -226,6 +226,50 @@ class Gate4EvidencePublisherTests(unittest.TestCase):
         self.assertEqual(inventory_paths, actual_paths)
         self.assertNotIn(publisher.INVENTORY_FILENAME, inventory_paths)
 
+    def test_expected_source_and_publication_root_identities_are_bound(self):
+        bundle_id = "bundle-identity-bound"
+        source = self.make_source(bundle_id)
+        source_stat = source.stat()
+        root_stat = self.publication_root.stat()
+        receipt = self.publish(
+            bundle_id,
+            source=source,
+            expected_source_identity={
+                "device": source_stat.st_dev,
+                "inode": source_stat.st_ino,
+            },
+            expected_publication_root_identity={
+                "device": root_stat.st_dev,
+                "inode": root_stat.st_ino,
+            },
+        )
+        final_stat = receipt.final_path.stat()
+        self.assertEqual(
+            receipt.source_directory_identity.as_dict(),
+            {"device": source_stat.st_dev, "inode": source_stat.st_ino},
+        )
+        self.assertEqual(
+            receipt.final_directory_identity.as_dict(),
+            {"device": final_stat.st_dev, "inode": final_stat.st_ino},
+        )
+
+        for label, keyword in (
+            ("source", "expected_source_identity"),
+            ("root", "expected_publication_root_identity"),
+        ):
+            rejected_id = f"bundle-wrong-{label}-identity"
+            rejected_source = self.make_source(rejected_id)
+            with self.subTest(label=label), self.assertRaises(
+                publisher.EvidenceValidationError
+            ):
+                publisher.publish_evidence(
+                    rejected_source,
+                    self.publication_root,
+                    self.summary(rejected_id),
+                    **{keyword: {"device": 0, "inode": 1}},
+                )
+            self.assertFalse((self.publication_root / rejected_id).exists())
+
     def test_summary_schema_rejects_missing_unknown_wrong_and_nested_unknown(self):
         base = self.summary("bundle-schema")
         for field in sorted(publisher.DRAFT_SUMMARY_FIELDS):

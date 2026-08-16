@@ -11,26 +11,36 @@ from __future__ import annotations
 
 import argparse
 import base64
+import contextlib
 import fnmatch
 import hashlib
 import json
 import math
 import os
 import re
+import stat
 import sys
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Dict, Mapping, Optional, Sequence
 
 from tools.validate_run import validate_run
+from tools.gate4_fs_identity import (
+    DirectoryIdentity,
+    Gate4FilesystemIdentityError,
+    pin_directory,
+)
 
 
 SPEC_VERSION = "gate4-ollama-endpoint-reuse-v1.1.0"
 APPROVAL_SCHEMA_VERSION = "gate4-ollama-endpoint-reuse-approval-v1.0.0"
 OBSERVATION_SCHEMA_VERSION = "gate4-ollama-endpoint-reuse-observations-v1.1.0"
 RESULT_SCHEMA_VERSION = "gate4-ollama-endpoint-reuse-result-v1.1.0"
-INDEX_SCHEMA_VERSION = "gate4-ollama-endpoint-reuse-artifact-index-v1.0.0"
-VALIDATION_SCHEMA_VERSION = "gate4-ollama-endpoint-reuse-validation-v1.0.0"
+INDEX_SCHEMA_VERSION = "gate4-ollama-endpoint-reuse-artifact-index-v1.1.0"
+VALIDATION_SCHEMA_VERSION = "gate4-ollama-endpoint-reuse-validation-v1.1.0"
+VALIDATION_COMMITMENT_SCHEMA_VERSION = (
+    "gate4-ollama-endpoint-reuse-validation-commitment-v1.1.0"
+)
 PUBLISHER_APPROVAL_SCHEMA_VERSION = "gate4-gpu-run-approval-v1.0.0"
 
 APPROVAL_FILENAME = "endpoint-reuse-approval.json"
@@ -43,6 +53,7 @@ OBSERVATIONS_FILENAME = "workload-observations.json"
 RESULT_FILENAME = "orchestrator-result.json"
 INDEX_FILENAME = "artifact-index.json"
 VALIDATION_FILENAME = "workload-validation.json"
+VALIDATION_COMMITMENT_FILENAME = "workload-validation-commitment.json"
 
 SAFE_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
@@ -159,6 +170,64 @@ class ValidationReport:
     errors: tuple[str, ...]
     warnings: tuple[str, ...]
     value: Dict[str, Any]
+    directory_identity: Optional[DirectoryIdentity]
+
+
+@dataclass(frozen=True)
+class PersistedValidation:
+    report: ValidationReport
+    sha256: str
+    directory_identity: DirectoryIdentity
+
+
+def _identity_failure_report(
+    error: BaseException,
+    *,
+    expected_approval_sha256: Optional[str],
+    source_identity: Optional[DirectoryIdentity],
+) -> ValidationReport:
+    message = f"{type(error).__name__}: {error}"
+    value = {
+        "schema_version": VALIDATION_SCHEMA_VERSION,
+        "spec_version": SPEC_VERSION,
+        "approval_id": None,
+        "approval_sha256": expected_approval_sha256,
+        "source_commit_sha": None,
+        "source_directory_identity": (
+            source_identity.as_dict() if source_identity is not None else None
+        ),
+        "operational_backend_result": "FAIL",
+        "evidence_publication_eligible": False,
+        "accepted_warnings": [],
+        "unknown_warnings": [],
+        "errors": [message],
+        "checks": {
+            "generation_calls_exactly_six": "FAIL",
+            "cleanup": "FAIL",
+            "cleanup_subchecks": {
+                "backend_cleanup_passed": False,
+                "final_unloads_complete": False,
+                "temporary_ports_closed": False,
+                "temporary_server_pids_absent": False,
+                "temporary_runner_pids_absent": False,
+                "all_gpus_idle": False,
+                "no_compute_processes": False,
+                "existing_service_unchanged": False,
+            },
+            "publication_scope": "STRUCTURE_ONLY_GENERIC_PUBLISHER",
+        },
+        "gate4_formal_pass": False,
+        "research_eligible": False,
+        "backend_freeze": {"status": "not_frozen"},
+    }
+    return ValidationReport(
+        operational_backend_result="FAIL",
+        publication_eligible=False,
+        errors=(message,),
+        warnings=(),
+        value=value,
+        directory_identity=None,
+    )
 
 
 def _sha256(data: bytes) -> str:
@@ -406,50 +475,193 @@ def _safe_relative(value: Any, context: str) -> str:
     return text
 
 
-def _read_file(root: Path, relative: str) -> bytes:
-    safe = _safe_relative(relative, "artifact path")
-    path = root / safe
-    if path.is_symlink() or not path.is_file():
-        raise EndpointReuseValidationError(f"artifact is not a regular file: {safe}")
-    if path.stat().st_nlink != 1:
-        raise EndpointReuseValidationError(f"artifact is hard-linked: {safe}")
-    before = path.stat()
-    data = path.read_bytes()
-    after = path.stat()
-    stable = lambda item: (
-        item.st_dev,
-        item.st_ino,
-        item.st_size,
-        item.st_mtime_ns,
-        item.st_ctime_ns,
-        item.st_nlink,
+_STABLE_STAT_FIELDS = (
+    "st_dev",
+    "st_ino",
+    "st_mode",
+    "st_nlink",
+    "st_uid",
+    "st_gid",
+    "st_size",
+    "st_mtime_ns",
+    "st_ctime_ns",
+)
+
+
+def _same_metadata(before: os.stat_result, after: os.stat_result) -> bool:
+    return all(
+        getattr(before, field) == getattr(after, field)
+        for field in _STABLE_STAT_FIELDS
     )
-    if stable(before) != stable(after) or len(data) != after.st_size:
-        raise EndpointReuseValidationError(f"artifact changed while read: {safe}")
-    return data
 
 
-def _regular_files(root: Path) -> Dict[str, Dict[str, Any]]:
+def _read_file(
+    root: Path,
+    relative: str,
+    *,
+    root_fd: Optional[int] = None,
+) -> bytes:
+    if root_fd is None:
+        try:
+            with pin_directory(root, "workload evidence root") as pinned:
+                return _read_file(pinned.path, relative, root_fd=pinned.fd)
+        except Gate4FilesystemIdentityError as error:
+            raise EndpointReuseValidationError(str(error)) from error
+    safe = _safe_relative(relative, "artifact path")
+    parts = PurePosixPath(safe).parts
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    file_flags = os.O_RDONLY | os.O_NOFOLLOW
+    if hasattr(os, "O_CLOEXEC"):
+        directory_flags |= os.O_CLOEXEC
+        file_flags |= os.O_CLOEXEC
+    current_fd = root_fd
+    opened_directories: list[int] = []
+    try:
+        for component in parts[:-1]:
+            named = os.stat(component, dir_fd=current_fd, follow_symlinks=False)
+            if stat.S_ISLNK(named.st_mode) or not stat.S_ISDIR(named.st_mode):
+                raise EndpointReuseValidationError(
+                    f"artifact path contains an unsafe directory: {safe}"
+                )
+            child_fd = os.open(component, directory_flags, dir_fd=current_fd)
+            opened = os.fstat(child_fd)
+            if (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino):
+                os.close(child_fd)
+                raise EndpointReuseValidationError(
+                    f"artifact directory changed while opening: {safe}"
+                )
+            opened_directories.append(child_fd)
+            current_fd = child_fd
+        name = parts[-1]
+        named_before = os.stat(name, dir_fd=current_fd, follow_symlinks=False)
+        if stat.S_ISLNK(named_before.st_mode) or not stat.S_ISREG(
+            named_before.st_mode
+        ):
+            raise EndpointReuseValidationError(
+                f"artifact is not a regular file: {safe}"
+            )
+        if named_before.st_nlink != 1:
+            raise EndpointReuseValidationError(f"artifact is hard-linked: {safe}")
+        descriptor = os.open(name, file_flags, dir_fd=current_fd)
+        try:
+            opened = os.fstat(descriptor)
+            if not _same_metadata(named_before, opened):
+                raise EndpointReuseValidationError(
+                    f"artifact changed while opening: {safe}"
+                )
+            chunks: list[bytes] = []
+            while True:
+                chunk = os.read(descriptor, 1024 * 1024)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+            after = os.fstat(descriptor)
+            named_after = os.stat(name, dir_fd=current_fd, follow_symlinks=False)
+            data = b"".join(chunks)
+            if (
+                not _same_metadata(opened, after)
+                or not _same_metadata(after, named_after)
+                or len(data) != after.st_size
+            ):
+                raise EndpointReuseValidationError(
+                    f"artifact changed while read: {safe}"
+                )
+            return data
+        finally:
+            os.close(descriptor)
+    except OSError as error:
+        raise EndpointReuseValidationError(
+            f"artifact cannot be safely opened: {safe}"
+        ) from error
+    finally:
+        for descriptor in reversed(opened_directories):
+            os.close(descriptor)
+
+
+def _regular_files(
+    root: Path,
+    *,
+    root_fd: Optional[int] = None,
+) -> Dict[str, Dict[str, Any]]:
+    if root_fd is None:
+        try:
+            with pin_directory(root, "workload evidence root") as pinned:
+                return _regular_files(pinned.path, root_fd=pinned.fd)
+        except Gate4FilesystemIdentityError as error:
+            raise EndpointReuseValidationError(str(error)) from error
     records: Dict[str, Dict[str, Any]] = {}
-    for path in sorted(root.rglob("*")):
-        if path.is_symlink():
-            raise EndpointReuseValidationError("attempt tree contains a symlink")
-        if path.is_dir():
-            continue
-        if not path.is_file() or path.stat().st_nlink != 1:
-            raise EndpointReuseValidationError("attempt tree contains an unsafe file")
-        relative = path.relative_to(root).as_posix()
-        data = _read_file(root, relative)
-        records[relative] = {
-            "sha256": _sha256(data),
-            "bytes": len(data),
-            "lines": data.count(b"\n"),
-        }
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    if hasattr(os, "O_CLOEXEC"):
+        directory_flags |= os.O_CLOEXEC
+
+    def names(descriptor: int) -> list[str]:
+        with os.scandir(descriptor) as iterator:
+            return sorted(entry.name for entry in iterator)
+
+    def visit(descriptor: int, prefix: str) -> None:
+        before = os.fstat(descriptor)
+        before_names = names(descriptor)
+        for name in before_names:
+            relative = f"{prefix}/{name}" if prefix else name
+            _safe_relative(relative, "artifact path")
+            named = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+            if stat.S_ISLNK(named.st_mode):
+                raise EndpointReuseValidationError(
+                    "attempt tree contains a symlink"
+                )
+            if stat.S_ISDIR(named.st_mode):
+                child = os.open(name, directory_flags, dir_fd=descriptor)
+                try:
+                    opened = os.fstat(child)
+                    if (opened.st_dev, opened.st_ino) != (
+                        named.st_dev,
+                        named.st_ino,
+                    ):
+                        raise EndpointReuseValidationError(
+                            "attempt directory changed while opening"
+                        )
+                    visit(child, relative)
+                    named_after = os.stat(
+                        name, dir_fd=descriptor, follow_symlinks=False
+                    )
+                    if not _same_metadata(os.fstat(child), named_after):
+                        raise EndpointReuseValidationError(
+                            "attempt directory changed during traversal"
+                        )
+                finally:
+                    os.close(child)
+                continue
+            if not stat.S_ISREG(named.st_mode) or named.st_nlink != 1:
+                raise EndpointReuseValidationError(
+                    "attempt tree contains an unsafe file"
+                )
+            data = _read_file(root, relative, root_fd=root_fd)
+            records[relative] = {
+                "sha256": _sha256(data),
+                "bytes": len(data),
+                "lines": data.count(b"\n"),
+            }
+        if names(descriptor) != before_names or not _same_metadata(
+            before, os.fstat(descriptor)
+        ):
+            raise EndpointReuseValidationError(
+                "attempt directory changed during traversal"
+            )
+
+    try:
+        visit(root_fd, "")
+    except OSError as error:
+        raise EndpointReuseValidationError(
+            "attempt tree cannot be safely traversed"
+        ) from error
     return records
 
 
-def _load_json(root: Path, relative: str) -> Any:
-    return decode_canonical_json(_read_file(root, relative), relative)
+def _load_json(root: Path, relative: str, *, root_fd: Optional[int] = None) -> Any:
+    return decode_canonical_json(
+        _read_file(root, relative, root_fd=root_fd),
+        relative,
+    )
 
 
 def _parse_transcript(data: bytes) -> list[Dict[str, Any]]:
@@ -773,16 +985,26 @@ def _publisher_owned(relative: str) -> bool:
     return first in PUBLISHER_OWNED_TOP_LEVEL or first == "publication"
 
 
-def _load_loose_json(root: Path, relative: str) -> Any:
-    data = _read_file(root, relative)
+def _load_loose_json(
+    root: Path,
+    relative: str,
+    *,
+    root_fd: Optional[int] = None,
+) -> Any:
+    data = _read_file(root, relative, root_fd=root_fd)
     try:
         return json.loads(data.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
         raise EndpointReuseValidationError(f"{relative} is not valid JSON") from error
 
 
-def _load_jsonl(root: Path, relative: str) -> list[Any]:
-    data = _read_file(root, relative)
+def _load_jsonl(
+    root: Path,
+    relative: str,
+    *,
+    root_fd: Optional[int] = None,
+) -> list[Any]:
+    data = _read_file(root, relative, root_fd=root_fd)
     rows: list[Any] = []
     for line_number, line in enumerate(data.splitlines(), start=1):
         try:
@@ -800,6 +1022,8 @@ def _validate_run_binding(
     result: Mapping[str, Any],
     generations: Sequence[Mapping[str, Any]],
     errors: list[str],
+    *,
+    root_fd: Optional[int] = None,
 ) -> None:
     expected_relative = f"runs/output_{approval['approval_id']}"
     if result.get("run_relative_path") != expected_relative:
@@ -821,7 +1045,7 @@ def _validate_run_binding(
         errors.append("independent_strict_validation_not_valid")
 
     run_meta = _load_loose_json(root, f"{expected_relative}/run_meta.json")
-    effective = _load_json(root, CONFIG_FILENAME)
+    effective = _load_json(root, CONFIG_FILENAME, root_fd=root_fd)
     if not isinstance(run_meta, dict):
         errors.append("run_meta_invalid")
         return
@@ -854,8 +1078,16 @@ def _validate_run_binding(
     if not isinstance(prompt_hash, str) or SHA256_RE.fullmatch(prompt_hash) is None:
         errors.append("run_meta_prompt_hash_invalid")
 
-    phase1 = _load_jsonl(root, f"{expected_relative}/phase1_raw.jsonl")
-    memory = _load_jsonl(root, f"{expected_relative}/memory_reasoning.jsonl")
+    phase1 = _load_jsonl(
+        root,
+        f"{expected_relative}/phase1_raw.jsonl",
+        root_fd=root_fd,
+    )
+    memory = _load_jsonl(
+        root,
+        f"{expected_relative}/memory_reasoning.jsonl",
+        root_fd=root_fd,
+    )
     if len(phase1) != 3 or len(memory) != 3 or len(generations) != 6:
         errors.append("simulation_raw_coverage_mismatch")
         return
@@ -918,40 +1150,103 @@ def validate_attempt(
     attempt_dir: Path | str,
     *,
     expected_approval_sha256: Optional[str] = None,
+    expected_directory_identity: Optional[Mapping[str, Any]] = None,
+    source_directory_identity: Optional[Mapping[str, Any]] = None,
+    _root_fd: Optional[int] = None,
+    _observed_identity: Optional[DirectoryIdentity] = None,
+    _source_identity: Optional[DirectoryIdentity] = None,
 ) -> ValidationReport:
-    root = Path(attempt_dir).resolve()
+    if _root_fd is None:
+        supplied_source: Optional[DirectoryIdentity] = None
+        try:
+            if source_directory_identity is not None:
+                supplied_source = DirectoryIdentity.from_value(
+                    source_directory_identity,
+                    "source directory identity",
+                )
+            with pin_directory(attempt_dir, "workload evidence root") as pinned:
+                observed_identity = pinned.identity
+                expected_identity = (
+                    DirectoryIdentity.from_value(
+                        expected_directory_identity,
+                        "expected directory identity",
+                    )
+                    if expected_directory_identity is not None
+                    else observed_identity
+                )
+                if observed_identity != expected_identity:
+                    raise Gate4FilesystemIdentityError(
+                        "workload evidence root identity differs from expected handoff"
+                    )
+                source_identity = supplied_source or observed_identity
+                report = validate_attempt(
+                    pinned.path,
+                    expected_approval_sha256=expected_approval_sha256,
+                    expected_directory_identity=expected_identity.as_dict(),
+                    source_directory_identity=source_identity.as_dict(),
+                    _root_fd=pinned.fd,
+                    _observed_identity=observed_identity,
+                    _source_identity=source_identity,
+                )
+                pinned.assert_path_identity()
+                return report
+        except (Gate4FilesystemIdentityError, OSError) as error:
+            return _identity_failure_report(
+                error,
+                expected_approval_sha256=expected_approval_sha256,
+                source_identity=supplied_source,
+            )
+
+    root = Path(os.path.abspath(os.fspath(attempt_dir)))
+    observed_identity = _observed_identity
+    source_identity = _source_identity or observed_identity
     errors: list[str] = []
     accepted_warnings: list[str] = []
     unknown_warnings: list[str] = []
     observed_aborted = False
     approval: Mapping[str, Any] = {}
+    cleanup_subchecks = {
+        "backend_cleanup_passed": False,
+        "final_unloads_complete": False,
+        "temporary_ports_closed": False,
+        "temporary_server_pids_absent": False,
+        "temporary_runner_pids_absent": False,
+        "all_gpus_idle": False,
+        "no_compute_processes": False,
+        "existing_service_unchanged": False,
+    }
+    cleanup_passed = False
     try:
-        if not root.is_dir() or root.is_symlink():
-            raise EndpointReuseValidationError("attempt path is not a safe directory")
-        first_tree = _regular_files(root)
-        approval_bytes = _read_file(root, APPROVAL_FILENAME)
+        first_tree = _regular_files(root, root_fd=_root_fd)
+        approval_bytes = _read_file(root, APPROVAL_FILENAME, root_fd=_root_fd)
         approval_sha = _sha256(approval_bytes)
         if expected_approval_sha256 is not None and approval_sha != expected_approval_sha256:
             raise EndpointReuseValidationError("approval SHA differs from expected pin")
         approval = validate_approval(
             decode_canonical_json(approval_bytes, APPROVAL_FILENAME)
         )
-        sha_text = _read_file(root, APPROVAL_SHA_FILENAME).decode("ascii")
+        sha_text = _read_file(
+            root, APPROVAL_SHA_FILENAME, root_fd=_root_fd
+        ).decode("ascii")
         if sha_text != approval_sha + "\n":
             raise EndpointReuseValidationError("approval SHA sidecar differs")
         projected = decode_canonical_json(
-            _read_file(root, PUBLISHER_APPROVAL_FILENAME),
+            _read_file(root, PUBLISHER_APPROVAL_FILENAME, root_fd=_root_fd),
             PUBLISHER_APPROVAL_FILENAME,
         )
         _exact_object(projected, PUBLISHER_APPROVAL_FIELDS, "publisher approval")
         if projected != publisher_approval_projection(approval):
             raise EndpointReuseValidationError("publisher approval projection differs")
 
-        index = _load_json(root, INDEX_FILENAME)
+        index = _load_json(root, INDEX_FILENAME, root_fd=_root_fd)
         index = _exact_object(index, {"schema_version", "files"}, "artifact index")
         if index["schema_version"] != INDEX_SCHEMA_VERSION or not isinstance(index["files"], dict):
             raise EndpointReuseValidationError("artifact index schema differs")
-        excluded = {INDEX_FILENAME, VALIDATION_FILENAME}
+        excluded = {
+            INDEX_FILENAME,
+            VALIDATION_FILENAME,
+            VALIDATION_COMMITMENT_FILENAME,
+        }
         actual_indexed = {
             path: record
             for path, record in first_tree.items()
@@ -960,7 +1255,7 @@ def validate_attempt(
         if index["files"] != actual_indexed:
             raise EndpointReuseValidationError("artifact index differs from captured files")
 
-        capture_start = _load_json(root, CAPTURE_START_FILENAME)
+        capture_start = _load_json(root, CAPTURE_START_FILENAME, root_fd=_root_fd)
         capture_start = _exact_object(
             capture_start,
             {
@@ -990,11 +1285,13 @@ def validate_attempt(
         if capture_start["artifact_hashes"] != expected_hashes:
             errors.append("capture_start_artifact_hashes_mismatch")
 
-        transcript = _parse_transcript(_read_file(root, TRANSCRIPT_FILENAME))
+        transcript = _parse_transcript(
+            _read_file(root, TRANSCRIPT_FILENAME, root_fd=_root_fd)
+        )
         state_history = [
             event["state"] for event in transcript if event["event"] == "state_entered"
         ]
-        result = _load_json(root, RESULT_FILENAME)
+        result = _load_json(root, RESULT_FILENAME, root_fd=_root_fd)
         result = _exact_object(
             result,
             {
@@ -1063,7 +1360,7 @@ def validate_attempt(
         if not isinstance(strict, dict) or strict.get("valid") is not True or strict.get("errors") != []:
             errors.append("strict_validation_not_valid")
 
-        observations = _load_json(root, OBSERVATIONS_FILENAME)
+        observations = _load_json(root, OBSERVATIONS_FILENAME, root_fd=_root_fd)
         observations = _exact_object(
             observations,
             {
@@ -1407,22 +1704,26 @@ def validate_attempt(
                     errors.append(f"unload_not_verified:{endpoint['model_role']}")
 
         cleanup = observations["cleanup"]
-        if not isinstance(cleanup, dict) or cleanup.get("passed") is not True:
-            errors.append("cleanup_observation_not_passed")
-        else:
+        if isinstance(cleanup, dict):
             expected_ports = [endpoint["port"] for endpoint in approval["endpoints"]]
             expected_pids = sorted(server["server_pid"] for server in server_by_role.values())
-            if cleanup.get("temporary_ports_closed") != expected_ports:
-                errors.append("cleanup_ports_not_closed")
-            if cleanup.get("temporary_server_pids_absent") != expected_pids:
-                errors.append("cleanup_server_pids_not_absent")
-            if cleanup.get("temporary_runner_pids_absent") is not True:
-                errors.append("cleanup_runner_pids_not_absent")
+            cleanup_subchecks["backend_cleanup_passed"] = cleanup.get("passed") is True
+            cleanup_subchecks["temporary_ports_closed"] = (
+                cleanup.get("temporary_ports_closed") == expected_ports
+            )
+            cleanup_subchecks["temporary_server_pids_absent"] = (
+                cleanup.get("temporary_server_pids_absent") == expected_pids
+            )
+            cleanup_subchecks["temporary_runner_pids_absent"] = (
+                cleanup.get("temporary_runner_pids_absent") is True
+            )
             if cleanup.get("prohibited_operations") != []:
                 errors.append("prohibited_operation_observed")
             existing = cleanup.get("existing_service")
             pre_existing = preflight.get("existing_service", {}) if isinstance(preflight, dict) else {}
-            if not isinstance(existing, dict) or (
+            cleanup_subchecks["existing_service_unchanged"] = isinstance(
+                existing, dict
+            ) and not (
                 existing.get("port") != 11434
                 or existing.get("pid") != approval["existing_ollama_pid_before"]
                 or existing.get("pid") != pre_existing.get("pid")
@@ -1431,41 +1732,53 @@ def validate_attempt(
                 != pre_existing.get("start_time_ticks")
                 or existing.get("command") != pre_existing.get("command")
                 or existing.get("ps_models") != []
-            ):
-                errors.append("existing_service_changed_during_cleanup")
+            )
             gpu_idle = cleanup.get("gpu_idle")
-            if not isinstance(gpu_idle, list) or len(gpu_idle) != 8:
-                errors.append("cleanup_gpu_idle_rows_missing")
-            else:
-                for row in gpu_idle:
-                    if (
-                        not isinstance(row, dict)
-                        or type(row.get("memory_used_mib")) is not int
-                        or row["memory_used_mib"] > approval["idle_memory_threshold_mib"]
-                        or row.get("utilization_gpu") != 0
-                        or row.get("compute_pids") != []
-                    ):
-                        errors.append("cleanup_gpu_not_idle")
-                        break
+            valid_gpu_rows = isinstance(gpu_idle, list) and len(gpu_idle) == 8
+            cleanup_subchecks["all_gpus_idle"] = bool(valid_gpu_rows) and all(
+                isinstance(row, dict)
+                and type(row.get("memory_used_mib")) is int
+                and row["memory_used_mib"] <= approval["idle_memory_threshold_mib"]
+                and row.get("utilization_gpu") == 0
+                for row in gpu_idle
+            )
+            cleanup_subchecks["no_compute_processes"] = bool(valid_gpu_rows) and all(
+                isinstance(row, dict) and row.get("compute_pids") == []
+                for row in gpu_idle
+            )
             final_unloads = cleanup.get("final_unloads")
-            if not isinstance(final_unloads, list) or len(final_unloads) != 3 or any(
-                not isinstance(item, dict)
-                or item.get("status_code") != 200
-                or item.get("done") is not True
-                or item.get("done_reason") != "unload"
-                for item in final_unloads
-            ):
-                errors.append("final_unload_not_verified")
+            cleanup_subchecks["final_unloads_complete"] = (
+                isinstance(final_unloads, list)
+                and len(final_unloads) == 3
+                and all(
+                    isinstance(item, dict)
+                    and item.get("status_code") == 200
+                    and item.get("done") is True
+                    and item.get("done_reason") == "unload"
+                    and item.get("ps_models_after") == []
+                    for item in final_unloads
+                )
+            )
+        cleanup_passed = all(cleanup_subchecks.values())
+        if not cleanup_passed:
+            errors.append("cleanup_required_subcheck_failed")
 
         if isinstance(generations, list):
-            _validate_run_binding(root, approval, result, generations, errors)
+            _validate_run_binding(
+                root,
+                approval,
+                result,
+                generations,
+                errors,
+                root_fd=_root_fd,
+            )
 
         accepted_warnings, unknown_warnings = _warning_result(
             observations["warnings"],
             approval["allowed_warning_patterns"],
             errors,
         )
-        second_tree = _regular_files(root)
+        second_tree = _regular_files(root, root_fd=_root_fd)
         if second_tree != first_tree:
             raise EndpointReuseValidationError("attempt tree changed during validation")
     except EndpointReuseValidationError as error:
@@ -1497,6 +1810,9 @@ def validate_attempt(
         "approval_id": approval_id,
         "approval_sha256": approval_sha,
         "source_commit_sha": source_commit,
+        "source_directory_identity": (
+            source_identity.as_dict() if source_identity is not None else None
+        ),
         "operational_backend_result": operational,
         "evidence_publication_eligible": eligible,
         "accepted_warnings": accepted_warnings,
@@ -1504,7 +1820,8 @@ def validate_attempt(
         "errors": errors,
         "checks": {
             "generation_calls_exactly_six": "PASS" if "generation_call_count_mismatch" not in errors else "FAIL",
-            "cleanup": "PASS" if not any("cleanup" in item for item in errors) else "FAIL",
+            "cleanup": "PASS" if cleanup_passed else "FAIL",
+            "cleanup_subchecks": cleanup_subchecks,
             "publication_scope": "STRUCTURE_ONLY_GENERIC_PUBLISHER",
         },
         "gate4_formal_pass": False,
@@ -1517,6 +1834,7 @@ def validate_attempt(
         errors=tuple(errors),
         warnings=tuple(accepted_warnings + unknown_warnings),
         value=value,
+        directory_identity=observed_identity,
     )
 
 
@@ -1528,6 +1846,106 @@ def write_validation_report(path: Path | str, report: ValidationReport) -> Path:
         handle.flush()
         os.fsync(handle.fileno())
     return destination
+
+
+def _validation_commitment_value(report: ValidationReport) -> Dict[str, Any]:
+    validation_bytes = canonical_json_bytes(report.value)
+    return {
+        "schema_version": VALIDATION_COMMITMENT_SCHEMA_VERSION,
+        "workload_validation_path": VALIDATION_FILENAME,
+        "workload_validation_sha256": _sha256(validation_bytes),
+        "operational_backend_result": report.operational_backend_result,
+        "evidence_publication_eligible": report.publication_eligible,
+        "source_directory_identity": report.value["source_directory_identity"],
+        "gate4_formal_pass": False,
+        "research_eligible": False,
+        "backend_freeze": {"status": "not_frozen"},
+    }
+
+
+def write_validation_commitment(
+    path: Path | str,
+    report: ValidationReport,
+) -> Path:
+    destination = Path(path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with destination.open("xb") as handle:
+        handle.write(canonical_json_bytes(_validation_commitment_value(report)))
+        handle.flush()
+        os.fsync(handle.fileno())
+    return destination
+
+
+def validate_persisted_validation(
+    attempt_dir: Path | str,
+    *,
+    expected_approval_sha256: Optional[str],
+    expected_directory_identity: Mapping[str, Any],
+    source_directory_identity: Mapping[str, Any],
+) -> PersistedValidation:
+    """Recompute workload status, then bind the persisted bytes and commitment."""
+    report = validate_attempt(
+        attempt_dir,
+        expected_approval_sha256=expected_approval_sha256,
+        expected_directory_identity=expected_directory_identity,
+        source_directory_identity=source_directory_identity,
+    )
+    if report.directory_identity is None:
+        raise EndpointReuseValidationError(
+            "workload evidence directory identity could not be verified"
+        )
+    expected_bytes = canonical_json_bytes(report.value)
+    try:
+        with pin_directory(attempt_dir, "persisted workload evidence root") as pinned:
+            if pinned.identity != report.directory_identity:
+                raise EndpointReuseValidationError(
+                    "workload evidence identity changed after derivation"
+                )
+            persisted_bytes = _read_file(
+                pinned.path,
+                VALIDATION_FILENAME,
+                root_fd=pinned.fd,
+            )
+            if persisted_bytes != expected_bytes:
+                raise EndpointReuseValidationError(
+                    "persisted workload validation differs from independent derivation"
+                )
+            commitment = decode_canonical_json(
+                _read_file(
+                    pinned.path,
+                    VALIDATION_COMMITMENT_FILENAME,
+                    root_fd=pinned.fd,
+                ),
+                VALIDATION_COMMITMENT_FILENAME,
+            )
+            commitment = _exact_object(
+                commitment,
+                {
+                    "schema_version",
+                    "workload_validation_path",
+                    "workload_validation_sha256",
+                    "operational_backend_result",
+                    "evidence_publication_eligible",
+                    "source_directory_identity",
+                    "gate4_formal_pass",
+                    "research_eligible",
+                    "backend_freeze",
+                },
+                "workload validation commitment",
+            )
+            expected_commitment = _validation_commitment_value(report)
+            if commitment != expected_commitment:
+                raise EndpointReuseValidationError(
+                    "workload validation commitment differs"
+                )
+            pinned.assert_path_identity()
+    except Gate4FilesystemIdentityError as error:
+        raise EndpointReuseValidationError(str(error)) from error
+    return PersistedValidation(
+        report=report,
+        sha256=_sha256(persisted_bytes),
+        directory_identity=report.directory_identity,
+    )
 
 
 class ArgumentParser(argparse.ArgumentParser):

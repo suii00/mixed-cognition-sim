@@ -21,16 +21,16 @@ import os
 import re
 import secrets
 import stat
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Dict, Iterator, Mapping, Optional, Sequence
 
 
-PUBLICATION_VERSION = "gate4-evidence-publisher-v1.0.0"
-PUBLICATION_SPEC_VERSION = "gate4-backend-evidence-publication-v1.0.0"
+PUBLICATION_VERSION = "gate4-evidence-publisher-v1.1.0"
+PUBLICATION_SPEC_VERSION = "gate4-backend-evidence-publication-v1.1.0"
 PUBLICATION_SPEC_PATH = "docs/GATE4_EVIDENCE_PUBLICATION_SPEC.md"
 EXPECTED_PUBLICATION_SPEC_SHA256 = (
-    "b204214fc9ee063d6a5fad956a2a59ac161f923986f524e9921055cca47eeed1"
+    "8201013f77d98cc0c63559fe31a7c3c8d4dc90b4d1eda0f245d0e56f77ba7b6c"
 )
 SUMMARY_SCHEMA_VERSION = "gate4-backend-evidence-summary-v1.0.0"
 APPROVAL_SCHEMA_VERSION = "gate4-gpu-run-approval-v1.0.0"
@@ -179,6 +179,40 @@ class PublicationReceipt:
     inventory_sha256: str
     bundle_root_sha256: str
     inventory_entries: int
+    source_directory_identity: Optional["DirectoryIdentity"]
+    final_directory_identity: "DirectoryIdentity"
+
+
+@dataclass(frozen=True)
+class DirectoryIdentity:
+    device: int
+    inode: int
+
+    @classmethod
+    def from_descriptor(cls, descriptor: int) -> "DirectoryIdentity":
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISDIR(metadata.st_mode):
+            raise EvidenceValidationError("directory identity descriptor is invalid")
+        return cls(metadata.st_dev, metadata.st_ino)
+
+    @classmethod
+    def from_value(
+        cls,
+        value: Mapping[str, Any],
+        context: str,
+    ) -> "DirectoryIdentity":
+        if not isinstance(value, Mapping) or set(value) != {"device", "inode"}:
+            raise EvidenceValidationError(f"{context} fields differ")
+        device = value["device"]
+        inode = value["inode"]
+        if type(device) is not int or device < 0:
+            raise EvidenceValidationError(f"{context}.device is invalid")
+        if type(inode) is not int or inode <= 0:
+            raise EvidenceValidationError(f"{context}.inode is invalid")
+        return cls(device, inode)
+
+    def as_dict(self) -> Dict[str, int]:
+        return {"device": self.device, "inode": self.inode}
 
 
 def _sha256_bytes(data: bytes) -> str:
@@ -1509,6 +1543,8 @@ def _verify_bundle_or_raise(
         inventory_sha256=inventory_sha,
         bundle_root_sha256=_bundle_root_hash(inventory_sha),
         inventory_entries=len(inventory),
+        source_directory_identity=None,
+        final_directory_identity=DirectoryIdentity.from_descriptor(root_fd),
     )
 
 
@@ -1743,11 +1779,29 @@ def publish_evidence(
     *,
     predecessor_path: Optional[Path | str] = None,
     checkpoint_hook: Optional[CheckpointHook] = None,
+    expected_source_identity: Optional[Mapping[str, Any]] = None,
+    expected_publication_root_identity: Optional[Mapping[str, Any]] = None,
 ) -> PublicationReceipt:
     """Publish a complete capture once, leaving failures only in hidden staging."""
     draft = dict(summary_draft)
     _validate_summary(draft, draft=True)
     predecessor = Path(predecessor_path) if predecessor_path is not None else None
+    expected_source = (
+        DirectoryIdentity.from_value(
+            expected_source_identity,
+            "expected source directory identity",
+        )
+        if expected_source_identity is not None
+        else None
+    )
+    expected_publication_root = (
+        DirectoryIdentity.from_value(
+            expected_publication_root_identity,
+            "expected publication root directory identity",
+        )
+        if expected_publication_root_identity is not None
+        else None
+    )
     publisher_source = _absolute_lexical_path(Path(__file__), "publisher source")
     repository = publisher_source.parents[1]
     with _pin_directory(source_dir, "source capture") as source_pin:
@@ -1761,6 +1815,8 @@ def publish_evidence(
                     draft,
                     predecessor=predecessor,
                     checkpoint_hook=checkpoint_hook,
+                    expected_source_identity=expected_source,
+                    expected_publication_root_identity=expected_publication_root,
                 )
 
 
@@ -1773,13 +1829,33 @@ def _publish_evidence_pinned(
     *,
     predecessor: Optional[Path],
     checkpoint_hook: Optional[CheckpointHook],
+    expected_source_identity: Optional[DirectoryIdentity],
+    expected_publication_root_identity: Optional[DirectoryIdentity],
 ) -> PublicationReceipt:
     bundle_id = draft["evidence_bundle_id"]
     source = source_pin.path
     root = root_pin.path
     final = root / bundle_id
-    source_identity = (os.fstat(source_pin.fd).st_dev, os.fstat(source_pin.fd).st_ino)
+    source_directory_identity = DirectoryIdentity.from_descriptor(source_pin.fd)
+    if (
+        expected_source_identity is not None
+        and source_directory_identity != expected_source_identity
+    ):
+        raise EvidenceValidationError(
+            "source capture identity differs from expected handoff"
+        )
+    source_identity = (
+        source_directory_identity.device,
+        source_directory_identity.inode,
+    )
     root_identity = (os.fstat(root_pin.fd).st_dev, os.fstat(root_pin.fd).st_ino)
+    if (
+        expected_publication_root_identity is not None
+        and DirectoryIdentity(*root_identity) != expected_publication_root_identity
+    ):
+        raise EvidenceValidationError(
+            "publication root identity differs from expected handoff"
+        )
     source_chain = {
         (os.fstat(descriptor).st_dev, os.fstat(descriptor).st_ino)
         for descriptor in source_pin.descriptors
@@ -2132,6 +2208,12 @@ def _publish_evidence_pinned(
                 raise EvidencePublicationError(
                     "published leaf commitments differ from verified staging"
                 )
-            return final_receipt
+            return replace(
+                final_receipt,
+                source_directory_identity=source_directory_identity,
+                final_directory_identity=DirectoryIdentity.from_descriptor(
+                    staging_fd
+                ),
+            )
         finally:
             os.close(staging_fd)

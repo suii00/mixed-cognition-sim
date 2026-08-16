@@ -1,6 +1,6 @@
 # Gate 4 Evidence Publication Specification
 
-Version: `gate4-backend-evidence-publication-v1.0.0`
+Version: `gate4-backend-evidence-publication-v1.1.0`
 
 Status: `IMPLEMENTATION CONTRACT — CPU VALIDATION ONLY — NOT RUN AUTHORIZATION`
 
@@ -19,7 +19,7 @@ evidence_publication_conformance
 formal_gate4_pass / research_eligible / backend_freeze.status
 ```
 
-Version 1.0.0 implements only the generic `publication_structure_only` profile.
+Version 1.1.0 implements only the generic `publication_structure_only` profile.
 Because that profile has no content-derived workload validator, it must record
 `operational_backend_result=NOT_EVALUATED`; it cannot publish PASS, FAIL,
 ABORTED, or warning classifications. A later capture-profile version may
@@ -72,6 +72,16 @@ final leaf, or any operation that can overwrite an existing final path.
 rename. It does not mean that filesystem permission bits prevent later
 third-party writes. Exact S/I/R commitments and an independent read-only
 verifier are therefore required for every later acceptance check.
+
+The caller supplies the expected source-capture and publication-root directory
+identities as exact `{device,inode}` pairs. The publisher opens every absolute
+path component from `/` with `O_DIRECTORY|O_NOFOLLOW`, compares the expected
+source/root identities with the opened descriptors, and retains the complete
+source, publication-root, repository, staging, and final descriptor chains
+through publication. The public receipt returns the exact source and final
+published-directory identities in addition to S/I/R. A later component must
+reject a named path that no longer identifies that receipt inode even when a
+replacement tree has byte-identical contents.
 
 ## 3. Approval record
 
@@ -217,7 +227,7 @@ bundle_root_sha256
 ```
 
 The publisher independently and fully validates the predecessor as a
-conforming original v1.0.0 bundle, recomputes those predecessor hashes, and
+conforming original v1.1.0 bundle, recomputes those predecessor hashes, and
 compares the actual predecessor capture bytes—not only its manifest—with the
 new capture. Correction chains and legacy/nonconforming predecessors are not
 accepted by this version. The old bundle is never edited. The historical
@@ -277,11 +287,26 @@ R = SHA256(b"MCS-EVIDENCE-BUNDLE-ROOT-V1\0" + bytes.fromhex(I))
 `I` and `R` are not inserted into an inventory-covered file, avoiding a hash
 cycle. The ledger records `S`, `I`, and `R` after a separate read-only check.
 
+The publisher receipt also records:
+
+```text
+source_directory_identity = {device,inode}
+final_directory_identity = {device,inode}
+```
+
+Directory identities are handoff commitments, not content hashes. The
+standalone verifier independently reopens the lexical final path component by
+component without importing publisher helpers, reports the observed final
+identity, and accepts an optional mandatory expected-final identity. A
+different device or inode makes the independent result invalid even if S/I/R
+would otherwise match.
+
 ## 7. Ordered atomic publication
 
 The mandatory order is:
 
-1. validate the approval and absence of the final leaf;
+1. no-follow pin the caller's source/publication-root identities, validate the
+   approval, and validate absence of the final leaf;
 2. enumerate and hash the complete source capture;
 3. copy raw/source artifacts exclusively into hidden staging;
 4. verify copied bytes and prove the source capture did not change;
@@ -297,8 +322,9 @@ The mandatory order is:
 11. run a fresh full staged verification after fsync and fix S/I/R from that
     final pre-publication state;
 12. atomically rename staging to the absent final leaf with no replacement;
-13. run a fresh publisher-internal read-only verification of the final leaf and
-    compare its S/I/R with the staged commitments.
+13. run a fresh publisher-internal read-only verification of the final leaf,
+    compare its S/I/R with the staged commitments, and recheck the named final
+    inode before returning the identity-bearing receipt.
 
 The final publisher pass in step 13 is distinct from the standalone,
 independently implemented acceptance verifier. Before any ledger acceptance,
@@ -323,6 +349,8 @@ At minimum, CPU tests must cover:
 - interruption after raw, summary, partial inventory, and verified inventory;
 - mechanical ineligibility of every partial/staging tree;
 - existing path, symlink path, and concurrent same-ID no-overwrite behavior;
+- expected source/publication-root identity mismatch, source/final
+  byte-identical inode replacement, and absolute parent-component replacement;
 - explicit correction/supersession and predecessor-hash validation;
 - inventory self-exclusion, sorting, exact path set, traversal, duplicate,
   missing, extra, and tamper rejection; and
@@ -331,7 +359,9 @@ At minimum, CPU tests must cover:
 The suite must also prove that the generic profile rejects caller-asserted
 operational outcomes, warnings, and broader claim scopes; that approval/source
 symlinks and hard links fail closed; and that source, stage, summary, or
-inventory changes during verification cannot yield a conforming receipt.
+inventory changes during verification cannot yield a conforming receipt. The
+standalone verifier must remain publisher-independent and must reject a final
+identity mismatch separately from S/I/R mismatch.
 
 Passing this CPU contract does not authorize endpoint reuse or any other GPU
 test. A new versioned workload specification and explicit run approval remain

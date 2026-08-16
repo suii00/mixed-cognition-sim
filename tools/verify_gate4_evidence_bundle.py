@@ -22,14 +22,14 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Dict, Mapping, Optional, Sequence
 
 
-REPORT_SCHEMA_VERSION = "gate4-independent-verification-report-v1.0.0"
+REPORT_SCHEMA_VERSION = "gate4-independent-verification-report-v1.1.0"
 SUMMARY_SCHEMA_VERSION = "gate4-backend-evidence-summary-v1.0.0"
 APPROVAL_SCHEMA_VERSION = "gate4-gpu-run-approval-v1.0.0"
 CAPTURE_MANIFEST_SCHEMA_VERSION = "gate4-evidence-capture-manifest-v1.0.0"
-PUBLISHER_VERSION = "gate4-evidence-publisher-v1.0.0"
-PUBLICATION_SPEC_VERSION = "gate4-backend-evidence-publication-v1.0.0"
+PUBLISHER_VERSION = "gate4-evidence-publisher-v1.1.0"
+PUBLICATION_SPEC_VERSION = "gate4-backend-evidence-publication-v1.1.0"
 EXPECTED_PUBLICATION_SPEC_SHA256 = (
-    "b204214fc9ee063d6a5fad956a2a59ac161f923986f524e9921055cca47eeed1"
+    "8201013f77d98cc0c63559fe31a7c3c8d4dc90b4d1eda0f245d0e56f77ba7b6c"
 )
 
 SUMMARY_FILENAME = "run-summary.json"
@@ -153,9 +153,35 @@ class FileRecord:
 
 
 @dataclass(frozen=True)
+class DirectoryIdentity:
+    device: int
+    inode: int
+
+    @classmethod
+    def from_value(
+        cls,
+        value: Mapping[str, Any],
+        context: str,
+    ) -> "DirectoryIdentity":
+        if not isinstance(value, Mapping) or set(value) != {"device", "inode"}:
+            raise IndependentVerificationError(f"{context} fields differ")
+        device = value["device"]
+        inode = value["inode"]
+        if type(device) is not int or device < 0:
+            raise IndependentVerificationError(f"{context}.device is invalid")
+        if type(inode) is not int or inode <= 0:
+            raise IndependentVerificationError(f"{context}.inode is invalid")
+        return cls(device, inode)
+
+    def as_dict(self) -> Dict[str, int]:
+        return {"device": self.device, "inode": self.inode}
+
+
+@dataclass(frozen=True)
 class TreeSnapshot:
     records: Mapping[str, FileRecord]
     contract_bytes: Mapping[str, bytes]
+    root_identity: DirectoryIdentity
 
 
 @dataclass(frozen=True)
@@ -168,6 +194,7 @@ class VerifiedCommitments:
     inventory_entries: int
     correction_kind: str
     capture_files: Mapping[str, Mapping[str, Any]]
+    directory_identity: DirectoryIdentity
 
 
 @dataclass(frozen=True)
@@ -185,6 +212,7 @@ class IndependentVerificationReport:
     formal_gate4_pass: bool
     research_eligible: bool
     backend_freeze_status: Optional[str]
+    directory_identity: Optional[DirectoryIdentity]
     errors: tuple[str, ...]
 
     def to_dict(self) -> Dict[str, Any]:
@@ -203,6 +231,11 @@ class IndependentVerificationReport:
             "formal_gate4_pass": self.formal_gate4_pass,
             "research_eligible": self.research_eligible,
             "backend_freeze_status": self.backend_freeze_status,
+            "directory_identity": (
+                self.directory_identity.as_dict()
+                if self.directory_identity is not None
+                else None
+            ),
             "errors": list(self.errors),
         }
 
@@ -522,6 +555,7 @@ def _snapshot_tree(root: Path) -> TreeSnapshot:
 
         root_descriptor = current_descriptor
         root_opened = os.fstat(root_descriptor)
+        root_identity = DirectoryIdentity(root_opened.st_dev, root_opened.st_ino)
         if not stat.S_ISDIR(root_opened.st_mode):
             raise IndependentVerificationError("evidence root is not a directory")
 
@@ -707,7 +741,11 @@ def _snapshot_tree(root: Path) -> TreeSnapshot:
     finally:
         for descriptor in reversed(opened_descriptors):
             os.close(descriptor)
-    return TreeSnapshot(records=records, contract_bytes=contract_bytes)
+    return TreeSnapshot(
+        records=records,
+        contract_bytes=contract_bytes,
+        root_identity=root_identity,
+    )
 
 
 def _parse_inventory(data: bytes) -> Dict[str, str]:
@@ -1025,6 +1063,7 @@ def _require_same_tree_snapshot(
     if (
         observed.records != expected.records
         or observed.contract_bytes != expected.contract_bytes
+        or observed.root_identity != expected.root_identity
     ):
         raise IndependentVerificationError(f"{context} changed during verification")
 
@@ -1113,6 +1152,7 @@ def _verify_or_raise(
         inventory_entries=len(inventory),
         correction_kind=summary["correction"]["kind"],
         capture_files=capture_files,
+        directory_identity=snapshot.root_identity,
     )
 
     correction = summary["correction"]
@@ -1178,6 +1218,7 @@ def _expected_commitment_errors(
     expected_summary_sha256: Optional[str],
     expected_inventory_sha256: Optional[str],
     expected_bundle_root_sha256: Optional[str],
+    expected_final_identity: Optional[Mapping[str, Any]],
 ) -> list[str]:
     pairs = (
         ("S", expected_summary_sha256, commitments.summary_sha256),
@@ -1192,6 +1233,17 @@ def _expected_commitment_errors(
             errors.append(f"expected {label} is not a lowercase SHA-256")
         elif expected != actual:
             errors.append(f"expected {label} commitment differs")
+    if expected_final_identity is not None:
+        try:
+            expected_identity = DirectoryIdentity.from_value(
+                expected_final_identity,
+                "expected final directory identity",
+            )
+        except IndependentVerificationError as error:
+            errors.append(str(error))
+        else:
+            if expected_identity != commitments.directory_identity:
+                errors.append("expected final directory identity differs")
     return errors
 
 
@@ -1201,6 +1253,7 @@ def verify_bundle(
     expected_summary_sha256: Optional[str] = None,
     expected_inventory_sha256: Optional[str] = None,
     expected_bundle_root_sha256: Optional[str] = None,
+    expected_final_identity: Optional[Mapping[str, Any]] = None,
     predecessor_path: Optional[Path | str] = None,
 ) -> IndependentVerificationReport:
     """Verify a published bundle without importing or invoking its publisher."""
@@ -1224,6 +1277,7 @@ def verify_bundle(
             formal_gate4_pass=False,
             research_eligible=False,
             backend_freeze_status=None,
+            directory_identity=None,
             errors=(f"{type(error).__name__}: {error}",),
         )
 
@@ -1232,6 +1286,7 @@ def verify_bundle(
         expected_summary_sha256=expected_summary_sha256,
         expected_inventory_sha256=expected_inventory_sha256,
         expected_bundle_root_sha256=expected_bundle_root_sha256,
+        expected_final_identity=expected_final_identity,
     )
     commitments_match = not mismatch_errors
     return IndependentVerificationReport(
@@ -1248,6 +1303,7 @@ def verify_bundle(
         formal_gate4_pass=False,
         research_eligible=False,
         backend_freeze_status="not_frozen",
+        directory_identity=commitments.directory_identity,
         errors=tuple(mismatch_errors),
     )
 
@@ -1278,16 +1334,28 @@ def _build_argument_parser() -> argparse.ArgumentParser:
         type=Path,
         help="required predecessor bundle for a derived correction",
     )
+    parser.add_argument("--expected-final-device", type=int)
+    parser.add_argument("--expected-final-inode", type=int)
     return parser
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     arguments = _build_argument_parser().parse_args(argv)
+    expected_identity = None
+    if (
+        arguments.expected_final_device is not None
+        or arguments.expected_final_inode is not None
+    ):
+        expected_identity = {
+            "device": arguments.expected_final_device,
+            "inode": arguments.expected_final_inode,
+        }
     report = verify_bundle(
         arguments.bundle,
         expected_summary_sha256=arguments.expected_summary_sha256,
         expected_inventory_sha256=arguments.expected_inventory_sha256,
         expected_bundle_root_sha256=arguments.expected_bundle_root_sha256,
+        expected_final_identity=expected_identity,
         predecessor_path=arguments.predecessor_path,
     )
     sys.stdout.write(

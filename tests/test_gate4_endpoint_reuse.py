@@ -1,9 +1,12 @@
 import contextlib
 import io
 import json
+import shutil
 import tempfile
+import threading
 import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -308,6 +311,8 @@ class FakeBackend:
             }
             for endpoint in approval["endpoints"]
         ]
+        if self.scenario == "final_unload_done_false":
+            final_unloads[0]["done"] = False
         gpu_idle = [
             {
                 "uuid": f"GPU-synthetic-{index}",
@@ -321,7 +326,7 @@ class FakeBackend:
         if self.scenario == "existing_service_changed":
             existing_pid += 1
         passed = self.scenario != "cleanup_failure"
-        return {
+        value = {
             "passed": passed,
             "errors": [] if passed else ["synthetic cleanup failure"],
             "temporary_ports_closed": [11440, 11441, 11442],
@@ -342,6 +347,19 @@ class FakeBackend:
             "termination_commands": [],
             "prohibited_operations": [],
         }
+        if self.scenario == "cleanup_missing_port":
+            value["temporary_ports_closed"] = [11440, 11441]
+        elif self.scenario == "cleanup_server_present":
+            value["temporary_server_pids_absent"] = value[
+                "temporary_server_pids_absent"
+            ][:-1]
+        elif self.scenario == "cleanup_runner_present":
+            value["temporary_runner_pids_absent"] = False
+        elif self.scenario == "cleanup_gpu_busy":
+            value["gpu_idle"][0]["memory_used_mib"] = 2048
+        elif self.scenario == "cleanup_compute_present":
+            value["gpu_idle"][0]["compute_pids"] = [9999]
+        return value
 
     def warnings(self):
         return list(self._warnings)
@@ -526,6 +544,24 @@ class EndpointReuseTests(unittest.TestCase):
         )
         return transport, transcript
 
+    @staticmethod
+    def rewrite_persisted_validation(root, *, result, eligible):
+        validation_path = Path(root) / validator.VALIDATION_FILENAME
+        value = json.loads(validation_path.read_text())
+        value["operational_backend_result"] = result
+        value["evidence_publication_eligible"] = eligible
+        value["errors"] = ["synthetic_persisted_validation_mutation"]
+        validation_bytes = validator.canonical_json_bytes(value)
+        validation_path.write_bytes(validation_bytes)
+        commitment_path = Path(root) / validator.VALIDATION_COMMITMENT_FILENAME
+        commitment = json.loads(commitment_path.read_text())
+        commitment["workload_validation_sha256"] = orchestrator._sha256(
+            validation_bytes
+        )
+        commitment["operational_backend_result"] = result
+        commitment["evidence_publication_eligible"] = eligible
+        commitment_path.write_bytes(validator.canonical_json_bytes(commitment))
+
     def test_successful_six_call_fixture_publishes_and_independently_verifies(self):
         backend = FakeBackend()
         approval, _, digest, receipt = self.run_fixture("success", backend=backend)
@@ -580,6 +616,22 @@ class EndpointReuseTests(unittest.TestCase):
         self.assertFalse(external["gate4_formal_pass"])
         self.assertFalse(external["research_eligible"])
         self.assertTrue(external["workload_revalidated"])
+        self.assertEqual(
+            external["workload_validation_sha256"],
+            orchestrator._sha256(
+                (receipt.final_path / validator.VALIDATION_FILENAME).read_bytes()
+            ),
+        )
+        self.assertEqual(external["workload_operational_backend_result"], "PASS")
+        self.assertTrue(external["workload_publication_eligible"])
+        self.assertEqual(
+            external["source_directory_identity"],
+            receipt.source_directory_identity.as_dict(),
+        )
+        self.assertEqual(
+            external["final_directory_identity"],
+            receipt.final_directory_identity.as_dict(),
+        )
         self.assertEqual(
             backend.generation_sequence,
             list(orchestrator.EXPECTED_PHASE_ROLE_ORDER),
@@ -775,6 +827,311 @@ class EndpointReuseTests(unittest.TestCase):
         self.assertIsNotNone(verification_receipt.final_path)
         verification_failure = json.loads(verification_receipt.receipt_path.read_text())
         self.assertEqual(verification_failure["status"], "verification_failed")
+
+    def test_persisted_validation_mutation_before_publication_is_rejected(self):
+        value = self.approval_value("reuse-persisted-source-mutation")
+        path, digest = self.write_approval(value)
+        real_publish = publisher.publish_evidence
+
+        def mutate_source(source, *args, **kwargs):
+            self.rewrite_persisted_validation(
+                source,
+                result="FAIL",
+                eligible=False,
+            )
+            return real_publish(source, *args, **kwargs)
+
+        with self.cpu_only_runtime(), mock.patch.object(
+            publisher,
+            "publish_evidence",
+            side_effect=mutate_source,
+        ):
+            receipt = orchestrator.run_approved_endpoint_reuse(
+                path,
+                digest,
+                repository=REPO_ROOT,
+                backend=FakeBackend(),
+                source_probe=self.source_probe,
+                sleep_fn=lambda _seconds: None,
+            )
+        self.assertFalse(receipt.publication_verified)
+        self.assertIsNone(receipt.final_path)
+        external = json.loads(receipt.receipt_path.read_text())
+        self.assertEqual(external["status"], "publication_failed")
+        self.assertEqual(external["operational_backend_result"], "FAIL")
+        self.assertEqual(external["workload_operational_backend_result"], "NOT_VERIFIED")
+        self.assertFalse(external["workload_publication_eligible"])
+
+    def test_persisted_validation_mutation_in_staging_is_rejected(self):
+        value = self.approval_value("reuse-persisted-staging-mutation")
+        path, digest = self.write_approval(value)
+        real_publish = publisher.publish_evidence
+
+        def mutate_staging(source, publication_root, summary, **kwargs):
+            workload_hook = kwargs["checkpoint_hook"]
+
+            def combined_hook(checkpoint, staging, final):
+                if checkpoint == "after_inventory_verification_before_publish":
+                    self.rewrite_persisted_validation(
+                        staging,
+                        result="FAIL",
+                        eligible=False,
+                    )
+                workload_hook(checkpoint, staging, final)
+
+            kwargs["checkpoint_hook"] = combined_hook
+            return real_publish(source, publication_root, summary, **kwargs)
+
+        with self.cpu_only_runtime(), mock.patch.object(
+            publisher,
+            "publish_evidence",
+            side_effect=mutate_staging,
+        ):
+            receipt = orchestrator.run_approved_endpoint_reuse(
+                path,
+                digest,
+                repository=REPO_ROOT,
+                backend=FakeBackend(),
+                source_probe=self.source_probe,
+                sleep_fn=lambda _seconds: None,
+            )
+        self.assertFalse(receipt.publication_verified)
+        self.assertIsNone(receipt.final_path)
+        external = json.loads(receipt.receipt_path.read_text())
+        self.assertEqual(external["status"], "publication_failed")
+
+    def test_published_validation_and_final_inode_swap_are_rejected(self):
+        value = self.approval_value("reuse-final-inode-mutation")
+        path, digest = self.write_approval(value)
+        real_verify = independent.verify_bundle
+        swapped = []
+
+        def swap_then_verify(bundle, **kwargs):
+            bundle = Path(bundle)
+            parked = bundle.with_name(bundle.name + "-original-inode")
+            bundle.rename(parked)
+            shutil.copytree(parked, bundle)
+            self.rewrite_persisted_validation(
+                bundle,
+                result="FAIL",
+                eligible=False,
+            )
+            swapped.append((parked, bundle))
+            return real_verify(bundle, **kwargs)
+
+        with self.cpu_only_runtime(), mock.patch.object(
+            independent,
+            "verify_bundle",
+            side_effect=swap_then_verify,
+        ):
+            receipt = orchestrator.run_approved_endpoint_reuse(
+                path,
+                digest,
+                repository=REPO_ROOT,
+                backend=FakeBackend(),
+                source_probe=self.source_probe,
+                sleep_fn=lambda _seconds: None,
+            )
+        self.assertEqual(len(swapped), 1)
+        self.assertFalse(receipt.publication_verified)
+        external = json.loads(receipt.receipt_path.read_text())
+        self.assertEqual(external["status"], "verification_failed")
+        self.assertFalse(external["workload_publication_eligible"])
+
+    def test_persisted_validation_mutation_after_publication_is_rejected(self):
+        value = self.approval_value("reuse-final-validation-mutation")
+        path, digest = self.write_approval(value)
+        real_verify = independent.verify_bundle
+
+        def mutate_then_verify(bundle, **kwargs):
+            self.rewrite_persisted_validation(
+                bundle,
+                result="FAIL",
+                eligible=False,
+            )
+            return real_verify(bundle, **kwargs)
+
+        with self.cpu_only_runtime(), mock.patch.object(
+            independent,
+            "verify_bundle",
+            side_effect=mutate_then_verify,
+        ):
+            receipt = orchestrator.run_approved_endpoint_reuse(
+                path,
+                digest,
+                repository=REPO_ROOT,
+                backend=FakeBackend(),
+                source_probe=self.source_probe,
+                sleep_fn=lambda _seconds: None,
+            )
+        self.assertFalse(receipt.publication_verified)
+        external = json.loads(receipt.receipt_path.read_text())
+        self.assertEqual(external["status"], "verification_failed")
+        self.assertEqual(external["workload_operational_backend_result"], "NOT_VERIFIED")
+        self.assertFalse(external["workload_publication_eligible"])
+
+    def test_source_inode_swap_is_rejected_even_with_identical_bytes(self):
+        value = self.approval_value("reuse-source-inode-swap")
+        path, digest = self.write_approval(value)
+        real_publish = publisher.publish_evidence
+
+        def swap_source(source, publication_root, summary, **kwargs):
+            source = Path(source)
+            parked = source.with_name(source.name + "-original-inode")
+            source.rename(parked)
+            shutil.copytree(parked, source)
+            return real_publish(source, publication_root, summary, **kwargs)
+
+        with self.cpu_only_runtime(), mock.patch.object(
+            publisher,
+            "publish_evidence",
+            side_effect=swap_source,
+        ):
+            receipt = orchestrator.run_approved_endpoint_reuse(
+                path,
+                digest,
+                repository=REPO_ROOT,
+                backend=FakeBackend(),
+                source_probe=self.source_probe,
+                sleep_fn=lambda _seconds: None,
+            )
+        self.assertFalse(receipt.publication_verified)
+        self.assertIsNone(receipt.final_path)
+        external = json.loads(receipt.receipt_path.read_text())
+        self.assertEqual(external["status"], "publication_failed")
+
+    def test_reverse_persisted_pass_against_recomputed_fail_is_rejected(self):
+        _, _, digest, receipt = self.run_fixture("success")
+        observations_path = receipt.attempt_path / validator.OBSERVATIONS_FILENAME
+        observations = json.loads(observations_path.read_text())
+        observations["generations"][0]["status_code"] = 503
+        observations_path.write_bytes(validator.canonical_json_bytes(observations))
+        with self.assertRaises(validator.EndpointReuseValidationError):
+            validator.validate_persisted_validation(
+                receipt.attempt_path,
+                expected_approval_sha256=digest,
+                expected_directory_identity=(
+                    receipt.source_directory_identity.as_dict()
+                ),
+                source_directory_identity=(
+                    receipt.source_directory_identity.as_dict()
+                ),
+            )
+
+    def test_symlink_root_is_rejected_consistently(self):
+        _, _, digest, receipt = self.run_fixture("success")
+        attempt_link = self.root / "attempt-link"
+        attempt_link.symlink_to(receipt.attempt_path, target_is_directory=True)
+        workload = validator.validate_attempt(
+            attempt_link,
+            expected_approval_sha256=digest,
+        )
+        self.assertFalse(workload.publication_eligible)
+        self.assertIsNone(workload.directory_identity)
+
+        final_link = self.root / "final-link"
+        final_link.symlink_to(receipt.final_path, target_is_directory=True)
+        generic = independent.verify_bundle(final_link)
+        self.assertFalse(generic.valid)
+        with self.assertRaises(publisher.EvidencePublicationError):
+            publisher.publish_evidence(
+                attempt_link,
+                self.root / "unused-publication-root",
+                orchestrator._summary_draft(
+                    self.approval_value("reuse-symlink-publisher")
+                ),
+            )
+
+    def test_cleanup_done_false_exposes_failed_subcheck(self):
+        _, _, _, receipt = self.run_fixture("final_unload_done_false")
+        self.assertFalse(receipt.publication_verified)
+        validation = json.loads(
+            (receipt.attempt_path / validator.VALIDATION_FILENAME).read_text()
+        )
+        self.assertEqual(validation["checks"]["cleanup"], "FAIL")
+        self.assertFalse(
+            validation["checks"]["cleanup_subchecks"]["final_unloads_complete"]
+        )
+        self.assertFalse(validation["evidence_publication_eligible"])
+
+    def test_each_cleanup_subcheck_is_reported_explicitly(self):
+        scenarios = {
+            "cleanup_failure": "backend_cleanup_passed",
+            "final_unload_done_false": "final_unloads_complete",
+            "cleanup_missing_port": "temporary_ports_closed",
+            "cleanup_server_present": "temporary_server_pids_absent",
+            "cleanup_runner_present": "temporary_runner_pids_absent",
+            "cleanup_gpu_busy": "all_gpus_idle",
+            "cleanup_compute_present": "no_compute_processes",
+            "existing_service_changed": "existing_service_unchanged",
+        }
+        for scenario, failed_check in scenarios.items():
+            with self.subTest(scenario=scenario):
+                _, _, _, receipt = self.run_fixture(scenario)
+                validation = json.loads(
+                    (receipt.attempt_path / validator.VALIDATION_FILENAME).read_text()
+                )
+                checks = validation["checks"]
+                self.assertEqual(checks["cleanup"], "FAIL")
+                self.assertFalse(checks["cleanup_subchecks"][failed_check])
+                self.assertFalse(validation["evidence_publication_eligible"])
+
+    def test_concurrent_claim_has_one_owner_and_controlled_collision(self):
+        value = self.approval_value("reuse-concurrent-claim")
+        path, digest = self.write_approval(value)
+
+        def invoke():
+            try:
+                return orchestrator.run_approved_endpoint_reuse(
+                    path,
+                    digest,
+                    repository=REPO_ROOT,
+                    backend=FakeBackend(),
+                    source_probe=self.source_probe,
+                    sleep_fn=lambda _seconds: None,
+                )
+            except Exception as error:
+                return error
+
+        with self.cpu_only_runtime(), ThreadPoolExecutor(max_workers=2) as executor:
+            outcomes = list(executor.map(lambda _index: invoke(), range(2)))
+        owners = [
+            outcome
+            for outcome in outcomes
+            if isinstance(outcome, orchestrator.OrchestrationReceipt)
+        ]
+        collisions = [
+            outcome
+            for outcome in outcomes
+            if isinstance(outcome, orchestrator.EndpointReuseCollisionError)
+        ]
+        self.assertEqual(len(owners), 1, outcomes)
+        self.assertEqual(len(collisions), 1, outcomes)
+        self.assertFalse(any(isinstance(outcome, FileExistsError) for outcome in outcomes))
+
+    def test_late_publisher_final_collision_is_normalized(self):
+        value = self.approval_value("reuse-late-final-collision")
+        path, digest = self.write_approval(value)
+        with self.cpu_only_runtime(), mock.patch.object(
+            publisher,
+            "publish_evidence",
+            side_effect=publisher.EvidenceCollisionError(
+                "synthetic final bundle claim race"
+            ),
+        ):
+            with self.assertRaises(orchestrator.EndpointReuseCollisionError):
+                orchestrator.run_approved_endpoint_reuse(
+                    path,
+                    digest,
+                    repository=REPO_ROOT,
+                    backend=FakeBackend(),
+                    source_probe=self.source_probe,
+                    sleep_fn=lambda _seconds: None,
+                )
+        receipt_path = Path(value["evidence_root"]) / "receipts" / (
+            value["approval_id"] + ".json"
+        )
+        self.assertFalse(receipt_path.exists())
 
     def test_runtime_failures_are_retained_and_never_published(self):
         scenarios = [

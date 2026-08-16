@@ -308,6 +308,7 @@ class IndependentGate4EvidenceVerifierTests(unittest.TestCase):
             expected_summary_sha256=receipt.summary_sha256,
             expected_inventory_sha256=receipt.inventory_sha256,
             expected_bundle_root_sha256=receipt.bundle_root_sha256,
+            expected_final_identity=receipt.final_directory_identity.as_dict(),
         )
         self.assertTrue(report.valid, report.errors)
         self.assertTrue(report.publication_conforming)
@@ -315,6 +316,22 @@ class IndependentGate4EvidenceVerifierTests(unittest.TestCase):
         self.assertEqual(report.summary_sha256, receipt.summary_sha256)
         self.assertEqual(report.inventory_sha256, receipt.inventory_sha256)
         self.assertEqual(report.bundle_root_sha256, receipt.bundle_root_sha256)
+        self.assertEqual(
+            report.directory_identity.as_dict(),
+            receipt.final_directory_identity.as_dict(),
+        )
+        wrong_identity = verifier.verify_bundle(
+            receipt.final_path,
+            expected_summary_sha256=receipt.summary_sha256,
+            expected_inventory_sha256=receipt.inventory_sha256,
+            expected_bundle_root_sha256=receipt.bundle_root_sha256,
+            expected_final_identity={"device": 0, "inode": 1},
+        )
+        self.assertFalse(wrong_identity.valid)
+        self.assertIn(
+            "expected final directory identity differs",
+            wrong_identity.errors,
+        )
 
     def test_expected_commitment_mismatch_is_nonzero_quality_without_reclassifying_structure(self):
         report = verifier.verify_bundle(
@@ -609,7 +626,11 @@ class IndependentGate4EvidenceVerifierTests(unittest.TestCase):
             if calls == 2:
                 retained = dict(snapshot.contract_bytes)
                 retained[verifier.SUMMARY_FILENAME] += b"changed-after-records"
-                return verifier.TreeSnapshot(snapshot.records, retained)
+                return verifier.TreeSnapshot(
+                    snapshot.records,
+                    retained,
+                    snapshot.root_identity,
+                )
             return snapshot
 
         with mock.patch.object(verifier, "_snapshot_tree", alter_second_snapshot):
@@ -742,7 +763,11 @@ class IndependentGate4EvidenceVerifierTests(unittest.TestCase):
                 self.assertEqual(root, corrected.resolve())
                 retained = dict(snapshot.contract_bytes)
                 retained[verifier.SUMMARY_FILENAME] += b"post-predecessor-swap"
-                return verifier.TreeSnapshot(snapshot.records, retained)
+                return verifier.TreeSnapshot(
+                    snapshot.records,
+                    retained,
+                    snapshot.root_identity,
+                )
             return snapshot
 
         with mock.patch.object(
