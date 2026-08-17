@@ -92,10 +92,13 @@ Evidence class must be one of: `direct observation`, `mechanical derivation`,
   CPU transport and made no backend/model claim. Gate 4 scope-limited Ollama
   capacity evidence and one auxiliary current-prompt smoke now exist. A later
   endpoint-reuse orchestrator/validator remains only a synthetic CPU-tested
-  implementation candidate with no run approval. The initial checker decision
-  at `9d737cd...` was FAIL; its bounded correction passes repository-owned CPU
-  regressions, while the combined independent tooling recheck remains pending
-  and tooling is not frozen. Formal Gate 4A reference evidence is
+  implementation candidate. Its initial checker decision at `9d737cd...` was
+  FAIL; a corrected candidate was tagged at `225ae75...`, but its first
+  approval review was also FAIL because the warning allowlist was broader than
+  intended. The rejected approval was not executed. A structured warning-policy
+  correction now passes repository-owned CPU regressions, while the combined
+  independent tooling recheck remains pending and replacement tooling is not
+  frozen. Formal Gate 4A reference evidence is
   `IN PROGRESS / NOT YET FROZEN`; Gate 4B vLLM work is
   `DEFERRED / BLOCKED ON OLLAMA EVIDENCE FREEZE`.
 - Gate 4 backend-smoke specification:
@@ -103,8 +106,8 @@ Evidence class must be one of: `direct observation`, `mechanical derivation`,
   `e0d55545b57a42b1e6c28c31a137f3f19e1413e4078cfb2851e1a47f009d2065`.
 - Gate 4 candidate-evidence index:
   `docs/GATE4_BACKEND_EVIDENCE_LEDGER.md`,
-  `gate4-backend-evidence-ledger-v1.4.0`, SHA-256
-  `601a193a81634c0c86fb4790ae7ff1d62d9466c39f18393e45535dd5dbc16fbe`.
+  `gate4-backend-evidence-ledger-v1.5.0`, SHA-256
+  `a1cf681d2626b44f7587d75d4498e19c73a9164e611bfb4d27306ff93e9b4167`.
 - Gate 4 evidence-publication contract:
   `docs/GATE4_EVIDENCE_PUBLICATION_SPEC.md`,
   `gate4-backend-evidence-publication-v1.1.0`, SHA-256
@@ -115,11 +118,14 @@ Evidence class must be one of: `direct observation`, `mechanical derivation`,
   `0e24765e78b858a0cbf27e6f66a0cc745aa188c3fb52ab1dafa51559352c6cee`.
 - FP16 three-endpoint endpoint-reuse specification:
   `docs/GATE4_OLLAMA_ENDPOINT_REUSE_SPEC.md`,
-  `gate4-ollama-endpoint-reuse-v1.1.0`, SHA-256
-  `8ce1eb7c7e1c18d4476532864e245e026d2ffc8c9b4b55d847d71bf2c9404d73`.
+  `gate4-ollama-endpoint-reuse-v1.2.0`, SHA-256
+  `b445f3ee303dd5a1cde98c63489b1bd501d77174ec98f01133b3bfd6fc9a1b4d`.
 - Retained endpoint-reuse tooling checker FAIL report:
   `docs/reviews/gate4_endpoint_reuse_tooling_checker_fail_20260817.md`, SHA-256
   `3ea4686254d285f5c269995b968ce1fcfb5b691cdb1f55c1ed2fc50b31995e9f`.
+- Retained endpoint-reuse approval-review FAIL report:
+  `docs/reviews/gate4_endpoint_reuse_approval_review_fail_20260818.md`, SHA-256
+  `bae439714c543d5b1353033ae0ade19f9b6c45f07a2357cf055dc90e7a9d055d`.
 - Prompt contains no bloc/model/self-or-other model identity: confirmed by the
   unchanged prompt hash; edge policy is applied structurally during delivery.
 - Prompt contains no desired result, qualitative evaluation, optimization target,
@@ -250,8 +256,8 @@ Evidence class must be one of: `direct observation`, `mechanical derivation`,
   reference-backend freeze remain incomplete.
 - Gate 4 auxiliary endpoint reuse: the initial closed-schema, approval-bound CPU
   candidate at `9828aea...` and its readiness documentation at `9d737cd...`
-  were subsequently classified `CHECKER FAIL / tooling freeze prohibited`.
-  The bounded corrections are
+  were classified `CHECKER FAIL / tooling freeze prohibited`. The first bounded
+  corrections are
   `05546a1174179fc04636dbfa263301a04bb8e203` and
   `6835508e3c20a2f3d7576746dcc76583eb944550`; commit
   `5d5fc5e1b8822f01599b482ec496b18850f1e47d` atomically updates the evidence
@@ -262,9 +268,23 @@ Evidence class must be one of: `direct observation`, `mechanical derivation`,
   rederived and commitment-bound at source, staging, and final boundaries;
   source/final directory identities cross-bind publisher and verifier; cleanup
   is an explicit eight-boolean conjunction; and claim races use a controlled
-  collision. This remains implementation evidence only: no endpoint-reuse
-  approval artifact exists and no real HTTP, Ollama, NVIDIA, sudo, process, or
-  GPU action was performed. A live result may not be inferred from CPU fixtures.
+  collision. The resulting tag
+  `gate4a-endpoint-reuse-tooling-frozen-20260817` at `225ae75...` is retained as
+  historical but superseded for execution. Its first approval candidate,
+  `gate4a-endpoint-reuse-fp16-20260817T124139Z`, SHA-256
+  `b97d603b2e34c0e7157398a916ae6485e60bc6304746cb2189a1db11187756d4`,
+  failed review and was not executed: a WARN-first collector plus whole-line
+  `time=*` glob semantics could let approved suffix content conceal another
+  event. Commit `3d87d22ff2ddd75b0e219b9ac9fda30cccec9ba0`
+  replaces that policy with physical-line structured parsing, explicit severity,
+  exact closed event identities, occurrence bounds, raw-line hashes, and
+  fail-closed malformed-event handling. Commit
+  `0bd7b5eed26ae10047b78aa1d504ffab48e9d77c` atomically repins the prompt6
+  runner to ledger v1.5.0. This remains implementation evidence only. No
+  orchestrator invocation, temporary endpoint, generation, unload, sudo,
+  NVIDIA/GPU workload, replacement approval, or real endpoint-reuse execution
+  occurred in this correction task. A live result may not be inferred from CPU
+  fixtures.
 - Gate 4B vLLM transport/API contract: deferred until Gate 4A evidence freeze.
   Its planned provider/transport/endpoint contract is `vllm`,
   `openai_compatible`, and `/v1/chat/completions`; no vLLM conformance or runtime
@@ -693,19 +713,33 @@ manifest does not authorize or complete the unfrozen production analysis plan.
   backend result.
 - Gate 4 endpoint-reuse tooling at `9d737cd...`: `CHECKER FAIL`; five blocking
   dispatch/validation/identity/cleanup findings and one collision-classification
-  defect are retained in the versioned review above. After the two bounded
-  correction commits, repository-owned tests report
-  `CPU SYNTHETIC PASS — 28/28`; publisher/verifier report `47/47`, prompt6
-  regression reports `10/10`, and the full suite reports `272/272`. `compileall`
-  and `git diff --check` pass. The timeout fixture now starts one actual backend
-  call, the seventh call is suppressed at six, and early Phase 3 performs zero
-  unloads. Persisted-result, alternate-inode, symlink, structured cleanup, and
-  controlled-collision fixtures fail closed. These tests inject a CPU backend
-  and prohibit real network/process/GPU work. They do not validate live sudo
-  policy, Ollama API shape, NVIDIA/process ancestry, endpoint stability, warning
-  behavior, or cleanup outcome. Combined independent tooling recheck is
-  `PENDING`; tooling freeze is `NOT DONE`. Endpoint-reuse execution approval is
-  `NO`, no approval artifact exists, and no live endpoint-reuse request ran.
+  defect are retained in the 2026-08-17 versioned review above. The bounded
+  correction later produced the historical tooling tag
+  `gate4a-endpoint-reuse-tooling-frozen-20260817` at `225ae75...`.
+- Gate 4 endpoint-reuse approval review: `FAIL`. Candidate
+  `gate4a-endpoint-reuse-fp16-20260817T124139Z`, SHA-256
+  `b97d603b2e34c0e7157398a916ae6485e60bc6304746cb2189a1db11187756d4`,
+  remains immutable, unauthorized, and unexecuted. The old tag is therefore
+  historical and superseded for execution. The warning collector and whole-line
+  glob policy could accept an approved WARN fragment without proving that the
+  physical record contained no other event.
+- Gate 4 structured warning-policy correction: endpoint-reuse spec
+  `gate4-ollama-endpoint-reuse-v1.2.0`, approval schema
+  `gate4-ollama-endpoint-reuse-approval-v1.1.0`, observation and workload-
+  validation schemas v1.2.0. Repository-owned tests report
+  `CPU SYNTHETIC PASS — 38/38`; publisher/verifier report `47/47`, prompt6
+  regression reports `10/10`, and the full suite reports `282/282`. `compileall`
+  and `git diff --check` pass. Exact six structured startup events yield
+  `PASS_WITH_WARNINGS`; no warnings yield `PASS`; an unknown/request-failure/
+  watchdog/stale-memory WARN or occurrence excess yields
+  `MANUAL_REVIEW_REQUIRED`; ERROR/FATAL/PANIC and malformed fatal evidence yield
+  `FAIL`. Non-PASS cases are publication ineligible. These tests use injected
+  CPU backends and guard real network/process/GPU entry points. They do not
+  validate live sudo policy, Ollama API shape, NVIDIA/process ancestry, endpoint
+  stability, real warning behavior, or cleanup outcome. Combined independent
+  tooling recheck is `PENDING`; replacement tooling freeze is `NOT DONE`.
+  Endpoint-reuse execution approval is `NO`; no new approval candidate exists,
+  and no live endpoint-reuse request ran.
 - Existing prompt6 evidence remains unchanged: operational result
   `PASS_WITH_WARNINGS`, publication `NONCONFORMING / NOT FORMALLY ACCEPTED`, and
   formal evidence eligibility `false`. The current runner ledger pin refresh is
