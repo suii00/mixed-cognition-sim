@@ -1,6 +1,6 @@
 # Gate 4 Ollama Endpoint-Reuse Specification
 
-Version: `gate4-ollama-endpoint-reuse-v1.1.0`
+Version: `gate4-ollama-endpoint-reuse-v1.2.0`
 
 Status: `CPU IMPLEMENTED CANDIDATE — REAL WORKLOAD NOT EXECUTED — NO EXECUTION APPROVAL`
 
@@ -51,7 +51,7 @@ edited, corrected, republished, or promoted by this workload.
 ## 3. Required approval artifact
 
 The only executable approval schema is
-`gate4-ollama-endpoint-reuse-approval-v1.0.0`. The approval is canonical JSON,
+`gate4-ollama-endpoint-reuse-approval-v1.1.0`. The approval is canonical JSON,
 has no unknown fields, and is supplied with its expected SHA-256. The CLI has
 no execution-setting overrides.
 
@@ -89,7 +89,7 @@ existing_ollama_port
 existing_ollama_pid_before
 ollama_binary
 server_user
-allowed_warning_patterns
+allowed_warning_events
 stop_conditions
 ```
 
@@ -123,8 +123,43 @@ top-level keep_alive = -1
 
 `maximum_wall_seconds`, request/cleanup timeouts, stability wait, and an idle
 memory threshold are positive bounded values fixed before execution. Warning
-patterns are preapproved shell-style full-string globs; an observed warning
-cannot be added after the run.
+approval uses no substring, regular-expression, shell glob, or whole-line
+wildcard matching. An observed event cannot be added after the run.
+
+`allowed_warning_events` is an ordered array of exactly six closed objects.
+Each object has exactly:
+
+```text
+role
+level
+source_file
+source_line
+message
+attributes
+maximum_occurrences
+```
+
+For each approved role and GPU UUID, the two fixed identities are:
+
+```text
+runner.go:722 / WARN / user overrode visible devices
+  attributes = {"CUDA_VISIBLE_DEVICES": <that role's exact UUID>}
+
+runner.go:726 / WARN /
+  if GPUs are not correctly discovered, unset and try again
+  attributes = {}
+```
+
+Every `maximum_occurrences` is one. Role, level, source file and line, message,
+attribute key set, and attribute values are compared exactly. Wildcard
+characters, unknown fields, duplicate identities, changed role/UUID binding,
+extra attributes, missing entries, and occurrence bounds other than one are
+rejected before an attempt. Absence of an approved event is acceptable.
+
+The historical `gate4-ollama-endpoint-reuse-approval-v1.0.0` schema and its
+`allowed_warning_patterns` field are rejected by v1.2 tooling. In particular,
+the rejected approval ID `gate4a-endpoint-reuse-fp16-20260817T124139Z` cannot
+be reused, edited, executed, or promoted.
 
 The closed v1 bounds are:
 
@@ -270,8 +305,9 @@ bundle.
 The attempt retains the exact approval, its hash, capture-start metadata,
 effective config, transcript, every generation-attempt record, six successful
 request/response records, native envelopes, unload responses, per-call and
-post-wait stability snapshots, raw API/CLI/GPU/process observations, warning
-log, Simulation run directory, strict report, cleanup observation, terminal
+post-wait stability snapshots, raw API/CLI/GPU/process observations, raw server
+logs, structured warning events with physical-line hashes, Simulation run
+directory, strict report, cleanup observation, terminal
 result, workload-validation report, and non-self-referential validation
 commitment. Every owned JSON file is canonical and
 every artifact is written exclusively. Failed, aborted, cleanup-failed,
@@ -308,6 +344,62 @@ distinct expected GPU UUIDs = 3
 elapsed time <= approved maximum
 ```
 
+### 7.1 Physical-line collection and structured diagnostics
+
+The server redirects stdout and stderr into one retained byte log per role.
+Collection splits that byte stream only at physical line delimiters. Adjacent
+lines are never concatenated, and an embedded line break is never a matchable
+event value. The physical line number is counted across all lines, including
+ordinary INFO lines that remain in the raw log.
+
+Each WARN/ERROR/FATAL/PANIC or malformed diagnostic-like physical line is
+represented by one closed structured event with exactly:
+
+```text
+parse_status
+role
+stream
+line_sequence
+timestamp
+level
+source_file
+source_line
+message
+attributes
+raw_line_base64
+raw_line_sha256
+malformation_reason
+diagnostic_indicators
+```
+
+`role` comes from the server context and `stream` is the fixed
+`combined_stdout_stderr`; neither is parsed from model or log text. The raw
+field is the exact delimiter-free physical line bytes in base64, and its
+SHA-256 is recomputed. The workload validator independently reparses the
+indexed `server-logs/<role>.log` bytes and requires exact event-list equality.
+
+The logfmt-like parser consumes the complete line. It requires one unique
+`time`, `level`, `source`, and `msg` token, rejects malformed quoting,
+unstructured trailing text, duplicate core keys or attributes, invalid UTF-8,
+missing timezone, unknown level, and invalid/nonpositive source line. Other
+unique key/value tokens become explicit attributes; no remainder is ignored.
+INFO and DEBUG remain in the raw log but are not warning-allowlist candidates.
+
+Severity derives only from the single parsed `level` field. Parsed
+ERROR/FATAL/PANIC, or any structured/malformed record carrying an ERROR,
+FATAL, PANIC, OOM, out-of-memory, crash, segfault, CUDA-error, or Xid indicator,
+is `FAIL`. A duplicate/mixed severity line is malformed and `FAIL` whenever a
+fatal indicator is present. A malformed nonfatal warning-like line is
+`MANUAL_REVIEW_REQUIRED`. A parsed WARN is accepted only when its structured
+identity exactly equals one of the six approved events and its occurrence
+bound is not exceeded. An unknown WARN, request-failure WARN, watchdog WARN,
+stale/free-memory WARN, wrong role/UUID/source/message, extra attribute, or
+excess occurrence is `MANUAL_REVIEW_REQUIRED`. None is publication eligible.
+
+An approved WARN on a later physical line may itself be recorded as accepted,
+but it can never hide or downgrade an earlier failing line; any error makes the
+overall result `FAIL`.
+
 For each endpoint, the initial and reload snapshots must preserve the exact
 server PID, port, model tag, full digest, F16 quantization, context 4096, GPU
 UUID, and one-GPU runner placement. API `size_vram==size>0` and endpoint CLI
@@ -340,12 +432,13 @@ temporary server PID. It does not escalate automatically to SIGKILL. It never ca
 `systemctl`, `service`, `shutdown`, or `reboot`, and never stops PID 373012 or
 any approved existing-service PID.
 
-No warnings yields `PASS`. Only warnings matching a preapproved pattern, with
-all other checks passing, yields `PASS_WITH_WARNINGS`. An unknown warning
-yields `MANUAL_REVIEW_REQUIRED`. Any ERROR, OOM, crash, generation failure,
-placement mismatch, cleanup failure, or evidence inconsistency yields `FAIL`.
-Keyboard interruption yields `ABORTED`. `PASS_WITH_WARNINGS` is not a formal
-Gate 4A pass under this version.
+No diagnostic events yields `PASS`. One or more exact approved structured WARN
+events, within each occurrence bound and with all other checks passing, yields
+`PASS_WITH_WARNINGS`. A structurally valid but unapproved WARN or malformed
+nonfatal warning-like line yields `MANUAL_REVIEW_REQUIRED`. ERROR/FATAL/PANIC,
+fatal indicators, generation failure, placement mismatch, cleanup failure, or
+evidence inconsistency yields `FAIL`. Keyboard interruption yields `ABORTED`.
+`PASS_WITH_WARNINGS` is not a formal Gate 4A pass under this version.
 
 ## 8. Publication and independent verification
 
@@ -415,6 +508,14 @@ GPU, Ollama, sudo, and network access. They must cover:
   change, reload UUID/digest/context/offload change, unexpected eviction,
   stability drift, unknown/fatal warning, cleanup failure, interruption, and
   existing-service mutation;
+- all six exact structured warning identities, no-warning PASS, mixed
+  ERROR/FATAL plus approved fragments on one line, an approved WARN after an
+  ERROR on a second physical line, duplicate severity, appended fatal text,
+  malformed quote/key, raw-line hash/trace mismatch, unknown/request-failure/
+  watchdog/stale-memory WARN, OOM/crash, wrong role/UUID/source/message,
+  extra attributes, and excess occurrence;
+- rejection of the historical v1.0 glob approval and static confirmation that
+  the warning acceptance path contains no whole-line glob matcher;
 - a first-call timeout with the queued Llama and Gemma workers suppressed,
   fake-clock expiry before the second reservation, direct rejection of a
   seventh generation before backend invocation, and early Phase 3 rejection
@@ -427,7 +528,9 @@ GPU, Ollama, sudo, and network access. They must cover:
   claim race with exactly one controlled collision;
 - one successful six-call fixture through workload validation, generic
   staging validation, publication, independent S/I/R verification, and final
-  workload revalidation; exact unload payload and exact-PID TERM tests; and
+  workload revalidation with all six exact warnings; ERROR/FATAL/unknown
+  variants that cannot publish; exact unload payload and exact-PID TERM tests;
+  and
 - retained `gate4_formal_pass=false`, `research_eligible=false`, and
   `backend_freeze.status=not_frozen` in every outcome.
 

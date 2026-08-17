@@ -63,6 +63,7 @@ from tools.validate_gate4_ollama_endpoint_reuse import (
     VALIDATION_COMMITMENT_FILENAME,
     canonical_json_bytes,
     decode_canonical_json,
+    parse_ollama_diagnostic_stream,
     publisher_approval_projection,
     validate_approval,
     validate_attempt,
@@ -149,7 +150,7 @@ class EndpointBackend(Protocol):
         servers: Sequence[Mapping[str, Any]],
     ) -> Dict[str, Any]: ...
 
-    def warnings(self) -> list[Dict[str, Any]]: ...
+    def warning_events(self) -> list[Dict[str, Any]]: ...
 
 
 @dataclass(frozen=True)
@@ -1245,7 +1246,7 @@ def _run_approved_endpoint_reuse(
         "generations": generations,
         "unloads": unloads,
         "stability_snapshots": stability_snapshots,
-        "warnings": active_backend.warnings(),
+        "warning_events": active_backend.warning_events(),
         "cleanup": cleanup,
         "execution_gate": execution_gate,
     }
@@ -1515,7 +1516,7 @@ class LocalOllamaBackend:
         self._processes: Dict[str, subprocess.Popen] = {}
         self._logs: Dict[str, Any] = {}
         self._servers: Dict[str, Dict[str, Any]] = {}
-        self._warnings: list[Dict[str, Any]] = []
+        self._warning_events: list[Dict[str, Any]] = []
 
     @staticmethod
     def _run(command: Sequence[str], *, timeout: int = 30, env=None) -> Dict[str, Any]:
@@ -2114,7 +2115,7 @@ class LocalOllamaBackend:
             handle.flush()
             os.fsync(handle.fileno())
             handle.close()
-        self._collect_warnings(attempt_dir)
+        self._collect_warning_events(attempt_dir)
         ports = [endpoint["port"] for endpoint in approval["endpoints"]]
         closed = [port for port in ports if not self._port_open(port)]
         absent = sorted(
@@ -2201,36 +2202,17 @@ class LocalOllamaBackend:
             "prohibited_operations": [],
         }
 
-    def _collect_warnings(self, attempt_dir: Path) -> None:
+    def _collect_warning_events(self, attempt_dir: Path) -> None:
         for role in ROLE_ORDER:
             path = attempt_dir / "server-logs" / f"{role}.log"
             if not path.is_file():
                 continue
-            for line in path.read_text(errors="replace").splitlines():
-                level = None
-                if "level=WARN" in line or " WARN " in line:
-                    level = "WARN"
-                elif "level=ERROR" in line or " ERROR " in line:
-                    level = "ERROR"
-                elif any(
-                    token in line.upper()
-                    for token in (
-                        "OOM",
-                        "OUT OF MEMORY",
-                        "PANIC",
-                        "FATAL",
-                        "CRASH",
-                        "SEGFAULT",
-                        "CUDA ERROR",
-                        "XID",
-                    )
-                ):
-                    level = "FATAL"
-                if level:
-                    self._warnings.append({"role": role, "level": level, "message": line})
+            self._warning_events.extend(
+                parse_ollama_diagnostic_stream(role, path.read_bytes())
+            )
 
-    def warnings(self) -> list[Dict[str, Any]]:
-        return copy.deepcopy(self._warnings)
+    def warning_events(self) -> list[Dict[str, Any]]:
+        return copy.deepcopy(self._warning_events)
 
 
 class ArgumentParser(argparse.ArgumentParser):

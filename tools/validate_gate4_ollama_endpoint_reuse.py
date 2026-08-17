@@ -12,15 +12,16 @@ from __future__ import annotations
 import argparse
 import base64
 import contextlib
-import fnmatch
 import hashlib
 import json
 import math
 import os
 import re
+import shlex
 import stat
 import sys
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import Any, Dict, Mapping, Optional, Sequence
 
@@ -32,12 +33,12 @@ from tools.gate4_fs_identity import (
 )
 
 
-SPEC_VERSION = "gate4-ollama-endpoint-reuse-v1.1.0"
-APPROVAL_SCHEMA_VERSION = "gate4-ollama-endpoint-reuse-approval-v1.0.0"
-OBSERVATION_SCHEMA_VERSION = "gate4-ollama-endpoint-reuse-observations-v1.1.0"
+SPEC_VERSION = "gate4-ollama-endpoint-reuse-v1.2.0"
+APPROVAL_SCHEMA_VERSION = "gate4-ollama-endpoint-reuse-approval-v1.1.0"
+OBSERVATION_SCHEMA_VERSION = "gate4-ollama-endpoint-reuse-observations-v1.2.0"
 RESULT_SCHEMA_VERSION = "gate4-ollama-endpoint-reuse-result-v1.1.0"
 INDEX_SCHEMA_VERSION = "gate4-ollama-endpoint-reuse-artifact-index-v1.1.0"
-VALIDATION_SCHEMA_VERSION = "gate4-ollama-endpoint-reuse-validation-v1.1.0"
+VALIDATION_SCHEMA_VERSION = "gate4-ollama-endpoint-reuse-validation-v1.2.0"
 VALIDATION_COMMITMENT_SCHEMA_VERSION = (
     "gate4-ollama-endpoint-reuse-validation-commitment-v1.1.0"
 )
@@ -136,7 +137,7 @@ APPROVAL_FIELDS = {
     "existing_ollama_pid_before",
     "ollama_binary",
     "server_user",
-    "allowed_warning_patterns",
+    "allowed_warning_events",
     "stop_conditions",
 }
 ENDPOINT_FIELDS = {
@@ -145,6 +146,44 @@ ENDPOINT_FIELDS = {
     "model_role",
     "model_tag",
     "model_digest",
+}
+ALLOWED_WARNING_EVENT_FIELDS = {
+    "role",
+    "level",
+    "source_file",
+    "source_line",
+    "message",
+    "attributes",
+    "maximum_occurrences",
+}
+WARNING_EVENT_FIELDS = {
+    "parse_status",
+    "role",
+    "stream",
+    "line_sequence",
+    "timestamp",
+    "level",
+    "source_file",
+    "source_line",
+    "message",
+    "attributes",
+    "raw_line_base64",
+    "raw_line_sha256",
+    "malformation_reason",
+    "diagnostic_indicators",
+}
+WARNING_STREAM = "combined_stdout_stderr"
+PARSED_LEVELS = {"DEBUG", "INFO", "WARN", "ERROR", "FATAL", "PANIC"}
+FATAL_DIAGNOSTIC_INDICATORS = {
+    "ERROR",
+    "FATAL",
+    "PANIC",
+    "OOM",
+    "OUT_OF_MEMORY",
+    "CRASH",
+    "SEGFAULT",
+    "CUDA_ERROR",
+    "XID",
 }
 PUBLISHER_APPROVAL_FIELDS = {
     "schema_version",
@@ -168,7 +207,7 @@ class ValidationReport:
     operational_backend_result: str
     publication_eligible: bool
     errors: tuple[str, ...]
-    warnings: tuple[str, ...]
+    warnings: tuple[Any, ...]
     value: Dict[str, Any]
     directory_identity: Optional[DirectoryIdentity]
 
@@ -245,6 +284,214 @@ def canonical_json_bytes(value: Any) -> bytes:
         ).encode("utf-8")
         + b"\n"
     )
+
+
+def _diagnostic_indicators(text: str) -> list[str]:
+    upper = text.upper()
+    indicators = set(
+        re.findall(r"(?<![A-Z0-9_])(WARN|ERROR|FATAL|PANIC)(?![A-Z0-9_])", upper)
+    )
+    phrases = (
+        ("OUT OF MEMORY", "OUT_OF_MEMORY"),
+        ("CUDA ERROR", "CUDA_ERROR"),
+        ("REQUEST FAILURE", "REQUEST_FAILURE"),
+        ("REQUEST FAILED", "REQUEST_FAILURE"),
+        ("WATCHDOG", "WATCHDOG"),
+        ("STALE-MEMORY", "STALE_MEMORY"),
+        ("STALE MEMORY", "STALE_MEMORY"),
+        ("UNABLE TO REFRESH FREE MEMORY", "STALE_MEMORY"),
+        ("SEGFAULT", "SEGFAULT"),
+        ("CRASH", "CRASH"),
+    )
+    for phrase, label in phrases:
+        if phrase in upper:
+            indicators.add(label)
+    if re.search(r"(?<![A-Z0-9_])OOM(?![A-Z0-9_])", upper):
+        indicators.add("OOM")
+    if re.search(r"(?<![A-Z0-9_])XID(?![A-Z0-9_])", upper):
+        indicators.add("XID")
+    return sorted(indicators)
+
+
+def _warning_event_base(
+    role: str,
+    stream: str,
+    line_sequence: int,
+    raw_line: bytes,
+) -> Dict[str, Any]:
+    decoded = None
+    try:
+        decoded = raw_line.decode("utf-8")
+    except UnicodeDecodeError:
+        pass
+    return {
+        "parse_status": "malformed",
+        "role": role,
+        "stream": stream,
+        "line_sequence": line_sequence,
+        "timestamp": None,
+        "level": None,
+        "source_file": None,
+        "source_line": None,
+        "message": None,
+        "attributes": {},
+        "raw_line_base64": base64.b64encode(raw_line).decode("ascii"),
+        "raw_line_sha256": _sha256(raw_line),
+        "malformation_reason": None,
+        "diagnostic_indicators": (
+            _diagnostic_indicators(decoded) if decoded is not None else []
+        ),
+    }
+
+
+def parse_ollama_log_line(
+    role: str,
+    stream: str,
+    line_sequence: int,
+    raw_line: bytes,
+) -> Dict[str, Any]:
+    """Parse one delimiter-free physical Ollama log line without partial matches."""
+
+    event = _warning_event_base(role, stream, line_sequence, raw_line)
+    if role not in ROLE_ORDER:
+        event["malformation_reason"] = "invalid_role"
+        return event
+    if stream != WARNING_STREAM:
+        event["malformation_reason"] = "invalid_stream"
+        return event
+    if type(line_sequence) is not int or line_sequence <= 0:
+        event["malformation_reason"] = "invalid_line_sequence"
+        return event
+    if b"\n" in raw_line or b"\r" in raw_line:
+        event["malformation_reason"] = "embedded_line_break"
+        return event
+    try:
+        text = raw_line.decode("utf-8")
+    except UnicodeDecodeError:
+        event["malformation_reason"] = "invalid_utf8"
+        return event
+    try:
+        tokens = shlex.split(text, comments=False, posix=True)
+    except ValueError:
+        event["malformation_reason"] = "malformed_quote"
+        return event
+    values: Dict[str, str] = {}
+    for token in tokens:
+        if "=" not in token:
+            event["malformation_reason"] = "trailing_unstructured_token"
+            return event
+        key, value = token.split("=", 1)
+        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.-]*", key) is None:
+            event["malformation_reason"] = "invalid_key"
+            return event
+        if key in values:
+            event["malformation_reason"] = f"duplicate_key:{key}"
+            return event
+        values[key] = value
+    required = {"time", "level", "source", "msg"}
+    missing = sorted(required - set(values))
+    if missing:
+        event["malformation_reason"] = "missing_key:" + ",".join(missing)
+        return event
+    timestamp = values.pop("time")
+    try:
+        parsed_timestamp = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+    except ValueError:
+        event["malformation_reason"] = "invalid_timestamp"
+        return event
+    if parsed_timestamp.tzinfo is None:
+        event["malformation_reason"] = "timestamp_without_timezone"
+        return event
+    level = values.pop("level")
+    if level not in PARSED_LEVELS:
+        event["malformation_reason"] = "invalid_level"
+        return event
+    source = values.pop("source")
+    source_match = re.fullmatch(r"([A-Za-z0-9_.-]+):([1-9][0-9]*)", source)
+    if source_match is None:
+        event["malformation_reason"] = "invalid_source"
+        return event
+    message = values.pop("msg")
+    if not message:
+        event["malformation_reason"] = "empty_message"
+        return event
+    event.update(
+        {
+            "parse_status": "parsed",
+            "timestamp": timestamp,
+            "level": level,
+            "source_file": source_match.group(1),
+            "source_line": int(source_match.group(2)),
+            "message": message,
+            "attributes": dict(sorted(values.items())),
+            "malformation_reason": None,
+        }
+    )
+    return event
+
+
+def parse_ollama_diagnostic_stream(
+    role: str,
+    raw_log: bytes,
+    *,
+    stream: str = WARNING_STREAM,
+) -> list[Dict[str, Any]]:
+    """Return structured diagnostic events while raw INFO/DEBUG stays in the log."""
+
+    physical_lines = raw_log.split(b"\n")
+    if physical_lines and physical_lines[-1] == b"":
+        physical_lines.pop()
+    events: list[Dict[str, Any]] = []
+    for line_sequence, raw_line in enumerate(physical_lines, start=1):
+        if raw_line.endswith(b"\r"):
+            raw_line = raw_line[:-1]
+        event = parse_ollama_log_line(role, stream, line_sequence, raw_line)
+        if event["parse_status"] == "parsed":
+            if event["level"] in {"WARN", "ERROR", "FATAL", "PANIC"}:
+                events.append(event)
+        elif b"level=" in raw_line or event["diagnostic_indicators"]:
+            events.append(event)
+    return events
+
+
+def expected_allowed_warning_events(approval: Mapping[str, Any]) -> list[Dict[str, Any]]:
+    endpoints = {
+        endpoint["model_role"]: endpoint
+        for endpoint in approval.get("endpoints", [])
+        if isinstance(endpoint, dict) and endpoint.get("model_role") in ROLE_ORDER
+    }
+    expected: list[Dict[str, Any]] = []
+    for role in ROLE_ORDER:
+        endpoint = endpoints.get(role)
+        if endpoint is None:
+            return []
+        expected.extend(
+            [
+                {
+                    "role": role,
+                    "level": "WARN",
+                    "source_file": "runner.go",
+                    "source_line": 722,
+                    "message": "user overrode visible devices",
+                    "attributes": {
+                        "CUDA_VISIBLE_DEVICES": endpoint.get("gpu_uuid")
+                    },
+                    "maximum_occurrences": 1,
+                },
+                {
+                    "role": role,
+                    "level": "WARN",
+                    "source_file": "runner.go",
+                    "source_line": 726,
+                    "message": (
+                        "if GPUs are not correctly discovered, unset and try again"
+                    ),
+                    "attributes": {},
+                    "maximum_occurrences": 1,
+                },
+            ]
+        )
+    return expected
 
 
 def _reject_nonfinite(value: Any, context: str) -> None:
@@ -438,11 +685,53 @@ def validate_approval(value: Any) -> Mapping[str, Any]:
         raise EndpointReuseValidationError("ollama_binary differs from the v1 path")
     if approval["server_user"] != "ollama":
         raise EndpointReuseValidationError("server_user must be ollama")
-    patterns = _sorted_unique_strings(
-        approval["allowed_warning_patterns"], "allowed_warning_patterns"
-    )
-    if any(len(pattern) > 512 for pattern in patterns):
-        raise EndpointReuseValidationError("warning pattern is too long")
+    allowed_events = approval["allowed_warning_events"]
+    if not isinstance(allowed_events, list) or len(allowed_events) != 6:
+        raise EndpointReuseValidationError(
+            "allowed_warning_events must contain exactly six events"
+        )
+    identities: set[bytes] = set()
+    for index, raw_event in enumerate(allowed_events):
+        event = _exact_object(
+            raw_event,
+            ALLOWED_WARNING_EVENT_FIELDS,
+            f"allowed_warning_events[{index}]",
+        )
+        for field in ("role", "level", "source_file", "message"):
+            value = _string(event[field], f"allowed_warning_events[{index}].{field}")
+            if any(character in value for character in "*?["):
+                raise EndpointReuseValidationError(
+                    "warning event identity cannot contain wildcard characters"
+                )
+        if event["role"] not in ROLE_ORDER or event["level"] != "WARN":
+            raise EndpointReuseValidationError("warning event role/level is invalid")
+        _positive_int(
+            event["source_line"],
+            f"allowed_warning_events[{index}].source_line",
+        )
+        if event["maximum_occurrences"] != 1:
+            raise EndpointReuseValidationError(
+                "warning event maximum_occurrences must equal one"
+            )
+        attributes = event["attributes"]
+        if not isinstance(attributes, dict) or any(
+            not isinstance(key, str)
+            or not key
+            or not isinstance(value, str)
+            or any(character in key or character in value for character in "*?[")
+            for key, value in attributes.items()
+        ):
+            raise EndpointReuseValidationError("warning event attributes are invalid")
+        identity = canonical_json_bytes(
+            {key: event[key] for key in ALLOWED_WARNING_EVENT_FIELDS if key != "maximum_occurrences"}
+        )
+        if identity in identities:
+            raise EndpointReuseValidationError("duplicate warning event identity")
+        identities.add(identity)
+    if allowed_events != expected_allowed_warning_events(approval):
+        raise EndpointReuseValidationError(
+            "allowed_warning_events differs from the six fixed v1.1 identities"
+        )
     conditions = _sorted_unique_strings(approval["stop_conditions"], "stop_conditions")
     if conditions != REQUIRED_STOP_CONDITIONS:
         raise EndpointReuseValidationError("stop_conditions differs from v1")
@@ -939,45 +1228,106 @@ def _validate_generation(
     _validate_snapshot(value.get("snapshot"), endpoint, server_pid, context, errors)
 
 
+def _warning_identity(event: Mapping[str, Any]) -> Dict[str, Any]:
+    return {
+        "role": event["role"],
+        "level": event["level"],
+        "source_file": event["source_file"],
+        "source_line": event["source_line"],
+        "message": event["message"],
+        "attributes": event["attributes"],
+    }
+
+
 def _warning_result(
     observed: Any,
-    patterns: Sequence[str],
+    allowed_events: Sequence[Mapping[str, Any]],
     errors: list[str],
-) -> tuple[list[str], list[str]]:
-    accepted: list[str] = []
-    unknown: list[str] = []
+) -> tuple[list[Dict[str, Any]], list[Dict[str, Any]]]:
+    accepted: list[Dict[str, Any]] = []
+    unknown: list[Dict[str, Any]] = []
     if not isinstance(observed, list):
-        errors.append("warnings_not_array")
+        errors.append("warning_events_not_array")
         return accepted, unknown
-    for index, warning in enumerate(observed):
-        if not isinstance(warning, dict) or set(warning) != {"role", "level", "message"}:
-            errors.append(f"warning[{index}]:shape_invalid")
+    allowed_by_identity = {
+        canonical_json_bytes(
+            {key: entry[key] for key in ALLOWED_WARNING_EVENT_FIELDS if key != "maximum_occurrences"}
+        ): entry["maximum_occurrences"]
+        for entry in allowed_events
+    }
+    occurrence_count = {identity: 0 for identity in allowed_by_identity}
+    for index, raw_event in enumerate(observed):
+        context = f"warning_event[{index}]"
+        if not isinstance(raw_event, dict) or set(raw_event) != WARNING_EVENT_FIELDS:
+            errors.append(f"{context}:shape_invalid")
             continue
-        role = warning.get("role")
-        level = warning.get("level")
-        message = warning.get("message")
-        if role not in ROLE_ORDER or not isinstance(level, str) or not isinstance(message, str):
-            errors.append(f"warning[{index}]:value_invalid")
+        event = dict(raw_event)
+        try:
+            raw_line = base64.b64decode(event["raw_line_base64"], validate=True)
+        except (KeyError, TypeError, ValueError):
+            errors.append(f"{context}:raw_line_base64_invalid")
             continue
-        rendered = f"{role}:{level}:{message}"
-        if level.upper() in {"ERROR", "FATAL"} or any(
-            token in message.upper()
-            for token in (
-                "OOM",
-                "OUT OF MEMORY",
-                "PANIC",
-                "CRASH",
-                "SEGFAULT",
-                "CUDA ERROR",
-                "XID",
-            )
-        ):
-            errors.append(f"fatal_backend_diagnostic:{rendered}")
-        elif any(fnmatch.fnmatchcase(rendered, pattern) for pattern in patterns):
-            accepted.append(rendered)
-        else:
-            unknown.append(rendered)
+        if _sha256(raw_line) != event.get("raw_line_sha256"):
+            errors.append(f"{context}:raw_line_hash_mismatch")
+            continue
+        recomputed = parse_ollama_log_line(
+            event.get("role"),
+            event.get("stream"),
+            event.get("line_sequence"),
+            raw_line,
+        )
+        if recomputed != event:
+            errors.append(f"{context}:structured_parse_mismatch")
+            continue
+        indicators = set(event["diagnostic_indicators"])
+        fatal = bool(indicators & FATAL_DIAGNOSTIC_INDICATORS)
+        if event["parse_status"] == "malformed":
+            if fatal:
+                errors.append(
+                    f"fatal_malformed_backend_diagnostic:{event['raw_line_sha256']}"
+                )
+            else:
+                unknown.append(event)
+            continue
+        if event["level"] in {"ERROR", "FATAL", "PANIC"} or fatal:
+            errors.append(f"fatal_backend_diagnostic:{event['raw_line_sha256']}")
+            continue
+        if event["level"] != "WARN":
+            errors.append(f"{context}:non_warning_event_in_warning_events")
+            continue
+        identity = canonical_json_bytes(_warning_identity(event))
+        maximum = allowed_by_identity.get(identity)
+        if maximum is None:
+            unknown.append(event)
+            continue
+        occurrence_count[identity] += 1
+        if occurrence_count[identity] > maximum:
+            unknown.append(event)
+            continue
+        accepted.append(event)
     return accepted, unknown
+
+
+def _validate_warning_event_trace(
+    root: Path,
+    observed: Any,
+    errors: list[str],
+    *,
+    root_fd: Optional[int],
+) -> None:
+    if not isinstance(observed, list):
+        return
+    expected: list[Dict[str, Any]] = []
+    for role in ROLE_ORDER:
+        relative = f"server-logs/{role}.log"
+        try:
+            raw_log = _read_file(root, relative, root_fd=root_fd)
+        except EndpointReuseValidationError as error:
+            errors.append(f"warning_trace_missing:{role}:{error}")
+            continue
+        expected.extend(parse_ollama_diagnostic_stream(role, raw_log))
+    if observed != expected:
+        errors.append("warning_event_raw_log_trace_mismatch")
 
 
 def _publisher_owned(relative: str) -> bool:
@@ -1201,8 +1551,8 @@ def validate_attempt(
     observed_identity = _observed_identity
     source_identity = _source_identity or observed_identity
     errors: list[str] = []
-    accepted_warnings: list[str] = []
-    unknown_warnings: list[str] = []
+    accepted_warnings: list[Dict[str, Any]] = []
+    unknown_warnings: list[Dict[str, Any]] = []
     observed_aborted = False
     approval: Mapping[str, Any] = {}
     cleanup_subchecks = {
@@ -1372,7 +1722,7 @@ def validate_attempt(
                 "generations",
                 "unloads",
                 "stability_snapshots",
-                "warnings",
+                "warning_events",
                 "cleanup",
                 "execution_gate",
             },
@@ -1773,9 +2123,15 @@ def validate_attempt(
                 root_fd=_root_fd,
             )
 
+        _validate_warning_event_trace(
+            root,
+            observations["warning_events"],
+            errors,
+            root_fd=_root_fd,
+        )
         accepted_warnings, unknown_warnings = _warning_result(
-            observations["warnings"],
-            approval["allowed_warning_patterns"],
+            observations["warning_events"],
+            approval["allowed_warning_events"],
             errors,
         )
         second_tree = _regular_files(root, root_fd=_root_fd)
@@ -1791,8 +2147,6 @@ def validate_attempt(
         source_commit = approval["source_commit_sha"]
 
     errors = list(dict.fromkeys(errors))
-    accepted_warnings = list(dict.fromkeys(accepted_warnings))
-    unknown_warnings = list(dict.fromkeys(unknown_warnings))
     if observed_aborted:
         operational = "ABORTED"
     elif errors:

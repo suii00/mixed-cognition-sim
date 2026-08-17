@@ -38,15 +38,51 @@ class FakeBackend:
         self.unload_count = 0
         self.cleanup_called = False
         self.generation_sequence = []
-        self._warnings = []
-        if scenario == "known_warning":
-            self._warnings = [
-                {"role": "qwen", "level": "WARN", "message": "approved warning"}
-            ]
-        elif scenario == "unknown_warning":
-            self._warnings = [
-                {"role": "qwen", "level": "WARN", "message": "new warning"}
-            ]
+        self._warning_events = []
+
+    @staticmethod
+    def _log_line(level, source_line, message, **attributes):
+        suffix = "".join(f" {key}={value}" for key, value in attributes.items())
+        return (
+            "time=2026-08-17T12:00:00+00:00 "
+            f"level={level} source=runner.go:{source_line} "
+            f"msg={json.dumps(message)}{suffix}\n"
+        )
+
+    def _logs_for_scenario(self, approval):
+        logs = {role: b"" for role in validator.ROLE_ORDER}
+        if self.scenario in {
+            "known_warning",
+            "error_with_approved_warning",
+            "fatal_with_approved_warning",
+        }:
+            for endpoint in approval["endpoints"]:
+                role = endpoint["model_role"]
+                text = self._log_line(
+                    "WARN",
+                    722,
+                    "user overrode visible devices",
+                    CUDA_VISIBLE_DEVICES=endpoint["gpu_uuid"],
+                )
+                text += self._log_line(
+                    "WARN",
+                    726,
+                    "if GPUs are not correctly discovered, unset and try again",
+                )
+                logs[role] = text.encode("utf-8")
+        if self.scenario == "unknown_warning":
+            logs["qwen"] = self._log_line("WARN", 999, "new warning").encode()
+        elif self.scenario == "error_with_approved_warning":
+            logs["qwen"] = (
+                self._log_line("ERROR", 900, "request failure").encode()
+                + logs["qwen"]
+            )
+        elif self.scenario == "fatal_with_approved_warning":
+            logs["qwen"] = (
+                self._log_line("FATAL", 901, "synthetic fatal event").encode()
+                + logs["qwen"]
+            )
+        return logs
 
     @staticmethod
     def _server_pid(role):
@@ -136,6 +172,16 @@ class FakeBackend:
         }
 
     def start_servers(self, approval, attempt_dir, preflight):
+        log_root = attempt_dir / "server-logs"
+        log_root.mkdir(parents=True, exist_ok=True)
+        logs = self._logs_for_scenario(approval)
+        for role in validator.ROLE_ORDER:
+            (log_root / f"{role}.log").write_bytes(logs[role])
+        self._warning_events = []
+        for role in validator.ROLE_ORDER:
+            self._warning_events.extend(
+                validator.parse_ollama_diagnostic_stream(role, logs[role])
+            )
         servers = []
         for index, endpoint in enumerate(approval["endpoints"]):
             role = endpoint["model_role"]
@@ -361,8 +407,8 @@ class FakeBackend:
             value["gpu_idle"][0]["compute_pids"] = [9999]
         return value
 
-    def warnings(self):
-        return list(self._warnings)
+    def warning_events(self):
+        return list(self._warning_events)
 
 
 class EndpointReuseTests(unittest.TestCase):
@@ -420,7 +466,9 @@ class EndpointReuseTests(unittest.TestCase):
             "existing_ollama_pid_before": 373012,
             "ollama_binary": "/usr/local/bin/ollama",
             "server_user": "ollama",
-            "allowed_warning_patterns": ["qwen:WARN:approved warning"],
+            "allowed_warning_events": validator.expected_allowed_warning_events(
+                {"endpoints": endpoints}
+            ),
             "stop_conditions": list(validator.REQUIRED_STOP_CONDITIONS),
         }
         value.update(overrides)
@@ -747,6 +795,231 @@ class EndpointReuseTests(unittest.TestCase):
         self.assertEqual(gate["terminal_stop_reason"], "phase1_state_not_complete")
         self.assertEqual(len(gate["suppressed_requests"]), 1)
 
+    def warning_result(self, logs_by_role):
+        approval = self.approval_value("reuse-warning-parser")
+        events = []
+        for role in validator.ROLE_ORDER:
+            events.extend(
+                validator.parse_ollama_diagnostic_stream(
+                    role,
+                    logs_by_role.get(role, b""),
+                )
+            )
+        errors = []
+        accepted, unknown = validator._warning_result(
+            events,
+            approval["allowed_warning_events"],
+            errors,
+        )
+        operational = (
+            "FAIL"
+            if errors
+            else "MANUAL_REVIEW_REQUIRED"
+            if unknown
+            else "PASS_WITH_WARNINGS"
+            if accepted
+            else "PASS"
+        )
+        return events, accepted, unknown, errors, operational
+
+    def exact_warning_logs(self):
+        approval = self.approval_value("reuse-exact-warning-lines")
+        return FakeBackend("known_warning")._logs_for_scenario(approval)
+
+    def test_structured_warning_exact_six_and_no_warning_results(self):
+        events, accepted, unknown, errors, operational = self.warning_result(
+            self.exact_warning_logs()
+        )
+        self.assertEqual(len(events), 6)
+        self.assertEqual(len(accepted), 6)
+        self.assertEqual(unknown, [])
+        self.assertEqual(errors, [])
+        self.assertEqual(operational, "PASS_WITH_WARNINGS")
+        for event in events:
+            self.assertEqual(set(event), validator.WARNING_EVENT_FIELDS)
+            self.assertEqual(event["parse_status"], "parsed")
+            self.assertEqual(event["level"], "WARN")
+            self.assertEqual(len(event["raw_line_sha256"]), 64)
+        _, accepted, unknown, errors, operational = self.warning_result({})
+        self.assertEqual((accepted, unknown, errors, operational), ([], [], [], "PASS"))
+
+    def test_mixed_severity_and_two_physical_lines_fail_closed(self):
+        approved = self.exact_warning_logs()["qwen"].splitlines()[0]
+        error = FakeBackend._log_line("ERROR", 900, "request failure").encode().strip()
+        fatal = FakeBackend._log_line("FATAL", 901, "fatal event").encode().strip()
+        cases = {
+            "error_then_approved_same_line": error + b" " + approved,
+            "fatal_then_approved_same_line": fatal + b" " + approved,
+            "approved_then_error_same_line": approved + b" " + error,
+            "two_physical_lines": error + b"\n" + approved + b"\n",
+            "duplicate_level": (
+                b'time=2026-08-17T12:00:00+00:00 level=WARN level=ERROR '
+                b'source=runner.go:722 msg="user overrode visible devices"'
+            ),
+        }
+        for name, raw in cases.items():
+            with self.subTest(name=name):
+                events, accepted, _, errors, operational = self.warning_result(
+                    {"qwen": raw}
+                )
+                self.assertTrue(events)
+                if name == "two_physical_lines":
+                    self.assertEqual(len(accepted), 1)
+                else:
+                    self.assertEqual(accepted, [])
+                self.assertTrue(errors)
+                self.assertEqual(operational, "FAIL")
+
+    def test_unknown_request_watchdog_and_stale_memory_warn_are_nonpublishable(self):
+        messages = (
+            "new warning",
+            "request failure",
+            "llama-server GPU discovery watchdog timed out",
+            "unable to refresh free memory, using old values",
+        )
+        for message in messages:
+            with self.subTest(message=message):
+                raw = FakeBackend._log_line("WARN", 999, message).encode()
+                _, accepted, unknown, errors, operational = self.warning_result(
+                    {"qwen": raw}
+                )
+                self.assertEqual(accepted, [])
+                self.assertEqual(errors, [])
+                self.assertEqual(len(unknown), 1)
+                self.assertEqual(operational, "MANUAL_REVIEW_REQUIRED")
+
+    def test_oom_and_crash_warn_remain_fatal(self):
+        for message in ("OOM while loading", "runner crash observed"):
+            with self.subTest(message=message):
+                raw = FakeBackend._log_line("WARN", 999, message).encode()
+                _, accepted, _, errors, operational = self.warning_result(
+                    {"qwen": raw}
+                )
+                self.assertEqual(accepted, [])
+                self.assertTrue(errors)
+                self.assertEqual(operational, "FAIL")
+
+    def test_warning_identity_role_gpu_source_message_and_attributes_are_exact(self):
+        approval = self.approval_value("reuse-warning-identity")
+        qwen_uuid = approval["endpoints"][0]["gpu_uuid"]
+        base = FakeBackend._log_line(
+            "WARN",
+            722,
+            "user overrode visible devices",
+            CUDA_VISIBLE_DEVICES=qwen_uuid,
+        ).encode()
+        cases = {
+            "wrong_role": {"llama": base},
+            "wrong_gpu": {
+                "qwen": FakeBackend._log_line(
+                    "WARN",
+                    722,
+                    "user overrode visible devices",
+                    CUDA_VISIBLE_DEVICES="GPU-wrong",
+                ).encode()
+            },
+            "wrong_source": {
+                "qwen": FakeBackend._log_line(
+                    "WARN",
+                    723,
+                    "user overrode visible devices",
+                    CUDA_VISIBLE_DEVICES=qwen_uuid,
+                ).encode()
+            },
+            "wrong_message": {
+                "qwen": FakeBackend._log_line(
+                    "WARN",
+                    722,
+                    "different message",
+                    CUDA_VISIBLE_DEVICES=qwen_uuid,
+                ).encode()
+            },
+            "extra_attribute": {
+                "qwen": FakeBackend._log_line(
+                    "WARN",
+                    722,
+                    "user overrode visible devices",
+                    CUDA_VISIBLE_DEVICES=qwen_uuid,
+                    unexpected="value",
+                ).encode()
+            },
+        }
+        for name, logs in cases.items():
+            with self.subTest(name=name):
+                _, accepted, unknown, errors, operational = self.warning_result(logs)
+                self.assertEqual(accepted, [])
+                self.assertEqual(errors, [])
+                self.assertEqual(len(unknown), 1)
+                self.assertEqual(operational, "MANUAL_REVIEW_REQUIRED")
+
+    def test_warning_duplicate_occurrence_malformed_quote_and_duplicate_key_reject(self):
+        approved = self.exact_warning_logs()["qwen"].splitlines()[0] + b"\n"
+        _, accepted, unknown, errors, operational = self.warning_result(
+            {"qwen": approved + approved}
+        )
+        self.assertEqual(len(accepted), 1)
+        self.assertEqual(len(unknown), 1)
+        self.assertEqual(errors, [])
+        self.assertEqual(operational, "MANUAL_REVIEW_REQUIRED")
+        malformed_cases = (
+            b'time=2026-08-17T12:00:00+00:00 level=WARN source=runner.go:722 msg="unterminated',
+            b'time=2026-08-17T12:00:00+00:00 level=WARN source=runner.go:722 source=runner.go:726 msg="duplicate"',
+        )
+        for raw in malformed_cases:
+            with self.subTest(raw=raw):
+                events, accepted, unknown, errors, operational = self.warning_result(
+                    {"qwen": raw}
+                )
+                self.assertEqual(events[0]["parse_status"], "malformed")
+                self.assertEqual(accepted, [])
+                self.assertEqual(errors, [])
+                self.assertEqual(len(unknown), 1)
+                self.assertEqual(operational, "MANUAL_REVIEW_REQUIRED")
+
+    def test_warning_parser_rejects_embedded_newline_and_has_no_glob_matcher(self):
+        event = validator.parse_ollama_log_line(
+            "qwen",
+            validator.WARNING_STREAM,
+            1,
+            b'level=ERROR msg="failure"\nlevel=WARN msg="approved"',
+        )
+        self.assertEqual(event["parse_status"], "malformed")
+        self.assertEqual(event["malformation_reason"], "embedded_line_break")
+        source = (REPO_ROOT / "tools/validate_gate4_ollama_endpoint_reuse.py").read_text()
+        self.assertNotIn("fnmatch", source)
+        self.assertNotIn("allowed_warning_patterns", source)
+
+    def test_warning_raw_hash_and_server_log_trace_are_verified(self):
+        root = self.root / "warning-trace"
+        log_root = root / "server-logs"
+        log_root.mkdir(parents=True)
+        logs = self.exact_warning_logs()
+        events = []
+        for role in validator.ROLE_ORDER:
+            (log_root / f"{role}.log").write_bytes(logs[role])
+            events.extend(validator.parse_ollama_diagnostic_stream(role, logs[role]))
+        errors = []
+        validator._validate_warning_event_trace(root, events, errors, root_fd=None)
+        self.assertEqual(errors, [])
+
+        tampered = json.loads(json.dumps(events))
+        tampered[0]["line_sequence"] += 1
+        errors = []
+        validator._validate_warning_event_trace(root, tampered, errors, root_fd=None)
+        self.assertIn("warning_event_raw_log_trace_mismatch", errors)
+
+        tampered = json.loads(json.dumps(events))
+        tampered[0]["raw_line_sha256"] = "0" * 64
+        approval = self.approval_value("reuse-warning-hash")
+        errors = []
+        accepted, unknown = validator._warning_result(
+            [tampered[0]],
+            approval["allowed_warning_events"],
+            errors,
+        )
+        self.assertEqual((accepted, unknown), ([], []))
+        self.assertIn("warning_event[0]:raw_line_hash_mismatch", errors)
+
     def test_known_warning_is_retained_without_formal_promotion(self):
         _, _, _, receipt = self.run_fixture("known_warning")
         self.assertTrue(receipt.publication_verified)
@@ -754,8 +1027,12 @@ class EndpointReuseTests(unittest.TestCase):
         validation = json.loads(
             (receipt.attempt_path / validator.VALIDATION_FILENAME).read_text()
         )
+        self.assertEqual(len(validation["accepted_warnings"]), 6)
+        self.assertEqual(validation["unknown_warnings"], [])
+        self.assertEqual(validation["errors"], [])
         self.assertEqual(
-            validation["accepted_warnings"], ["qwen:WARN:approved warning"]
+            [event["role"] for event in validation["accepted_warnings"]],
+            ["qwen", "qwen", "llama", "llama", "gemma", "gemma"],
         )
         self.assertFalse(validation["gate4_formal_pass"])
 
@@ -764,6 +1041,14 @@ class EndpointReuseTests(unittest.TestCase):
         self.assertFalse(receipt.publication_verified)
         self.assertEqual(receipt.operational_backend_result, "MANUAL_REVIEW_REQUIRED")
         self.assertIsNone(receipt.final_path)
+
+    def test_error_or_fatal_with_approved_warnings_fails_without_publication(self):
+        for scenario in ("error_with_approved_warning", "fatal_with_approved_warning"):
+            with self.subTest(scenario=scenario):
+                _, _, _, receipt = self.run_fixture(scenario)
+                self.assertFalse(receipt.publication_verified)
+                self.assertEqual(receipt.operational_backend_result, "FAIL")
+                self.assertIsNone(receipt.final_path)
 
     def test_stability_wait_and_abort_classification_are_mechanical(self):
         value = self.approval_value("reuse-stability")
@@ -1225,6 +1510,41 @@ class EndpointReuseTests(unittest.TestCase):
         unknown = self.approval_value("reuse-unknown-field")
         unknown["cli_override"] = True
         mutations["unknown"] = unknown
+        for label, value in mutations.items():
+            with self.subTest(label=label):
+                path, digest = self.write_approval(value)
+                with self.assertRaises(orchestrator.EndpointReuseInvocationError):
+                    orchestrator.load_approval(path, digest)
+
+    def test_old_glob_approval_and_malformed_structured_allowlists_are_rejected(self):
+        old = self.approval_value("reuse-old-glob-approval")
+        old["schema_version"] = "gate4-ollama-endpoint-reuse-approval-v1.0.0"
+        old.pop("allowed_warning_events")
+        old["allowed_warning_patterns"] = ["time=* level=WARN *"]
+        mutations = {"old_glob_schema": old}
+
+        missing = self.approval_value("reuse-warning-missing")
+        missing["allowed_warning_events"] = missing["allowed_warning_events"][:-1]
+        mutations["missing_event"] = missing
+
+        duplicate = self.approval_value("reuse-warning-duplicate")
+        duplicate["allowed_warning_events"][-1] = dict(
+            duplicate["allowed_warning_events"][0]
+        )
+        mutations["duplicate_identity"] = duplicate
+
+        wildcard = self.approval_value("reuse-warning-wildcard")
+        wildcard["allowed_warning_events"][0]["message"] = "user overrode *"
+        mutations["wildcard"] = wildcard
+
+        excess = self.approval_value("reuse-warning-excess-bound")
+        excess["allowed_warning_events"][0]["maximum_occurrences"] = 2
+        mutations["excess_bound"] = excess
+
+        extra = self.approval_value("reuse-warning-extra-field")
+        extra["allowed_warning_events"][0]["unexpected"] = True
+        mutations["unknown_event_field"] = extra
+
         for label, value in mutations.items():
             with self.subTest(label=label):
                 path, digest = self.write_approval(value)
