@@ -1,6 +1,6 @@
 # Gate 4 Backend Evidence Ledger
 
-Version: `gate4-backend-evidence-ledger-v1.4.0`
+Version: `gate4-backend-evidence-ledger-v1.5.0`
 
 Status: `WORKING CANDIDATE INDEX — NOT A BACKEND FREEZE`
 
@@ -413,8 +413,9 @@ The corrected contract and implementation pins are:
 
 The observation, result, artifact-index, workload-validation,
 workload-validation-commitment, and external-receipt schemas are version 1.1.0.
-The endpoint approval remains the unchanged closed v1.0.0 schema; no approval
-artifact was created. The generic summary, generic approval, and capture-
+At that correction checkpoint, the endpoint approval remained the closed
+v1.0.0 schema and no approval artifact had yet been created. The generic
+summary, generic approval, and capture-
 manifest schemas also remain v1.0.0 because their shapes did not change.
 
 The workload-local `ApprovalExecutionGate` preserves the frozen Gate 2 rule
@@ -471,7 +472,8 @@ entry points. They do not establish that live sudo policy, Ollama 0.32.13 API
 responses, process ancestry, NVIDIA rows, warning behavior, exact-PID cleanup,
 or stability timing will satisfy the contract. No real HTTP request, Ollama
 request, `nvidia-smi`, sudo call, temporary server, process signal, or GPU
-workload was performed. No real endpoint-reuse approval artifact exists.
+workload was performed by that tooling-correction test run. The later rejected
+approval candidate and warning-policy correction are recorded in section 6.
 
 The current prompt6 runner's ledger pin is refreshed only to follow these
 updated repository-ledger bytes. The dependency is one-way: this ledger does
@@ -480,7 +482,8 @@ bundle remain unchanged; they are not altered, republished, repaired, or
 reclassified. Their retained axes remain `PASS_WITH_WARNINGS`,
 `NONCONFORMING / NOT FORMALLY ACCEPTED`, and formal eligibility `false`.
 
-Therefore the exact current classification is:
+Therefore the classification at completion of that limited correction, before
+the historical tooling tag and later approval review, was:
 
 ```text
 Gate 4A tooling corrected implementation candidate: PASS
@@ -495,3 +498,137 @@ Research eligibility: false
 
 A future real attempt requires a new explicit approval naming the then-clean
 HEAD and exact bounded envelope. This ledger entry does not grant that approval.
+
+## 6. Structured warning-policy correction
+
+This section is CPU implementation and approval-review evidence only. It is
+not an Ollama, NVIDIA, model, endpoint-reuse, cleanup, or backend-freeze
+observation.
+
+### 6.1 Historical tooling freeze and rejected approval
+
+The annotated tag
+`gate4a-endpoint-reuse-tooling-frozen-20260817` peels to
+`225ae755f3dff2400d2fa8a60b1d1bb9a3e17071`. That tag remains immutable
+historical evidence but is `SUPERSEDED FOR REAL EXECUTION` because the first
+approval review found a blocking warning-policy defect. It is not moved,
+deleted, or retagged by this correction.
+
+The rejected candidate is retained byte-for-byte outside the repository:
+
+```text
+approval ID  = gate4a-endpoint-reuse-fp16-20260817T124139Z
+approval SHA = b97d603b2e34c0e7157398a916ae6485e60bc6304746cb2189a1db11187756d4
+summary SHA  = 06f8c71a5f5fa8a299e9152b8535305a72da4ac263bfa52e3c29c70e278a821f
+review       = FAIL
+authorization = NO
+execution    = NOT PERFORMED
+```
+
+The JSON and summary remain mode 0444 and are not edited, replaced, deleted,
+reauthorized, or executed. Their approval ID, bundle ID, and SHA cannot be
+reused. Candidate creation previously used read-only GETs against the existing
+11434 service to record its identity; it did not invoke the orchestrator,
+start temporary endpoints, call generation, unload a model, use sudo, run an
+NVIDIA probe, or start a GPU workload.
+
+The review directly identified two linked defects. A raw line containing
+`level=WARN` could be classified WARN before a later ERROR/FATAL indicator on
+the same captured line, and the approved whole-line `fnmatch` glob beginning
+`time=*` allowed `*` to span arbitrary intervening content. An approved suffix
+could therefore conceal a preceding unapproved or fatal event. Narrowing the
+six glob strings could not repair the contract.
+
+### 6.2 Corrected structured contract
+
+Commit `3d87d22ff2ddd75b0e219b9ac9fda30cccec9ba0`,
+`fix: require structured Gate 4 warning events`, replaces whole-line glob
+acceptance with a complete physical-line parser and exact structured identity
+comparison. Its current pins are:
+
+- endpoint-reuse specification
+  `gate4-ollama-endpoint-reuse-v1.2.0`, SHA-256
+  `b445f3ee303dd5a1cde98c63489b1bd501d77174ec98f01133b3bfd6fc9a1b4d`;
+- executable approval schema
+  `gate4-ollama-endpoint-reuse-approval-v1.1.0`;
+- orchestrator `tools/gate4_endpoint_reuse_orchestrator.py`, SHA-256
+  `d7c17e92607eeb3e8ab59ae4f6d972282327c70fda070627ca1225d95f720915`;
+- workload validator `tools/validate_gate4_ollama_endpoint_reuse.py`, SHA-256
+  `01df6039ee2701ab831ffca44bd2fe6ee7cc47d10745703d0831448ad7fb5644`;
+- unchanged publication specification, publisher, and standalone verifier,
+  SHA-256 respectively
+  `8201013f77d98cc0c63559fe31a7c3c8d4dc90b4d1eda0f245d0e56f77ba7b6c`,
+  `83bb7a19f945023e3de0ad7a470eab82123d34d7b1e213b69aaaab4ff8298734`,
+  and `c31fe2f06eba5f86086092e6dc3e2682c9c1be5c5eb76d24664a6e0fac6f5e5b`.
+
+The observation and workload-validation schemas are version 1.2.0 because
+they now retain structured events and structured accepted/unknown results.
+The result, artifact-index, validation-commitment, and external-receipt schemas
+remain version 1.1.0 because their public field structures did not change. The
+generic publication projection is unchanged.
+
+Each diagnostic physical line is independently bounded, base64-retained,
+SHA-256-bound, assigned a role/context stream and physical line sequence, and
+fully parsed as logfmt-like key/value input. The parser rejects embedded line
+breaks, duplicate keys, mixed/duplicate severity, malformed quotes, missing or
+invalid time/level/source/message, invalid source line, and any ignored trailing
+token. The validator reparses the indexed server-log bytes and requires exact
+structured event equality; no whole-line wildcard matcher remains.
+
+The approval contains exactly six closed structured warning identities: the
+two fixed startup events for each role/UUID. Role, level `WARN`, source file and
+line, message, complete attribute set, and value are exact; each maximum
+occurrence is one. Absence is allowed. Wrong role/UUID/source/message, an extra
+attribute, unknown WARN, request-failure WARN, watchdog WARN, stale/free-memory
+WARN, or an excess occurrence is `MANUAL_REVIEW_REQUIRED` and publication
+ineligible. Parsed or malformed ERROR/FATAL/PANIC, OOM, crash, segfault,
+CUDA-error, or Xid evidence is `FAIL`. A later exact WARN cannot downgrade an
+earlier failing physical line. The old approval schema and glob field are
+rejected before any attempt.
+
+### 6.3 CPU results and current boundary
+
+The structured correction produced:
+
+```text
+endpoint-reuse targeted suite     38/38 PASS
+publisher + independent verifier  47/47 PASS
+prompt6 regression                10/10 PASS
+complete repository suite        282/282 PASS
+compileall                         PASS
+git diff --check                  PASS
+```
+
+The exact-six fixture yields `PASS_WITH_WARNINGS`, publication eligibility,
+atomic publication, independent S/I/R verification, and a successful external
+receipt while retaining formal/research false. A no-warning fixture yields
+`PASS`. Unknown/request-failure/watchdog/stale-memory and excess-occurrence
+fixtures are non-publishable. ERROR/FATAL mixed with approved content on the
+same or a preceding physical line yields `FAIL` and no publication. Raw-line
+hash and server-log trace tampering are rejected. CPU fixtures guard real
+network and process entry points.
+
+No GPU, `nvidia-smi`, Ollama/API, sudo, network, temporary server, process
+signal, real approval, or endpoint execution was used by this warning-policy
+implementation task. The existing rejected approval was only read to confirm
+its immutable SHA. No replacement approval or tooling tag has been created,
+and nothing has been pushed.
+
+The current prompt6 runner's ledger pin is refreshed only to follow the final
+v1.5.0 ledger bytes. This ledger does not pin the current runner SHA, so the
+dependency remains one-way. Historical prompt6 bytes and classification are
+unchanged.
+
+The exact current classification is:
+
+```text
+Gate 4A warning-policy corrected tooling candidate: PASS
+Combined independent tooling recheck: PENDING
+Replacement tooling freeze: NOT DONE
+Old tooling tag: HISTORICAL / SUPERSEDED FOR EXECUTION
+Rejected approval: NOT AUTHORIZED / NOT EXECUTED
+New approval candidate: NOT CREATED
+Formal Gate 4A: NOT PASSED / NOT FROZEN
+Backend freeze: not_frozen
+Research eligibility: false
+```
