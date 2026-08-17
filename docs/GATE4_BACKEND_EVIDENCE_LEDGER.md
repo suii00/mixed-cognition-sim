@@ -1,6 +1,6 @@
 # Gate 4 Backend Evidence Ledger
 
-Version: `gate4-backend-evidence-ledger-v1.3.0`
+Version: `gate4-backend-evidence-ledger-v1.4.0`
 
 Status: `WORKING CANDIDATE INDEX — NOT A BACKEND FREEZE`
 
@@ -325,90 +325,173 @@ backend evidence and does not authorize another GPU run.
 
 - Publication contract:
   `docs/GATE4_EVIDENCE_PUBLICATION_SPEC.md`, version
-  `gate4-backend-evidence-publication-v1.0.0`, SHA-256
-  `b204214fc9ee063d6a5fad956a2a59ac161f923986f524e9921055cca47eeed1`.
-- Repository-owned publisher: `tools/gate4_evidence_publisher.py`, SHA-256
-  `743ec7c4f6a492105aed2d67dc27e0c95b89389cf033d1b76360bbdb1dc9e85e`.
+  `gate4-backend-evidence-publication-v1.1.0`, SHA-256
+  `8201013f77d98cc0c63559fe31a7c3c8d4dc90b4d1eda0f245d0e56f77ba7b6c`.
+- Repository-owned publisher: `tools/gate4_evidence_publisher.py`, version
+  `gate4-evidence-publisher-v1.1.0`, SHA-256
+  `83bb7a19f945023e3de0ad7a470eab82123d34d7b1e213b69aaaab4ff8298734`.
 - Independent parser/verifier:
-  `tools/verify_gate4_evidence_bundle.py`, SHA-256
-  `9338bc43cbe0fe53f1893c7c5dc9b522faed5dee62762b88bd0b64bddf4fdcf4`;
-  it does not import the publisher and requires caller-supplied S/I/R
-  commitments when those pins are available.
-- CPU result: `46/46 PASS` for the publisher and independent-verifier suites,
-  which jointly cover all targeted schema, canonical-byte, no-follow,
-  collision, interruption,
-  correction, inventory, TOCTOU, independent-S/I/R, and interoperability
-  fixtures. These are CPU fixtures, not backend observations.
+  `tools/verify_gate4_evidence_bundle.py`, report schema
+  `gate4-independent-verification-report-v1.1.0`, SHA-256
+  `c31fe2f06eba5f86086092e6dc3e2682c9c1be5c5eb76d24664a6e0fac6f5e5b`;
+  it does not import the publisher and requires caller-supplied S/I/R and final
+  directory identity when those pins are available.
+- CPU result: `47/47 PASS` in 1.505 seconds for the publisher and independent-
+  verifier suites. They cover the closed schemas, canonical bytes, component-
+  wise no-follow traversal, source/root/final directory identities, collisions,
+  interruption, correction, inventory, TOCTOU, independent S/I/R, and
+  interoperability. These are CPU fixtures, not backend observations.
 - Generic-profile boundary:
   `operational_backend_result=NOT_EVALUATED`,
   `claim_scope=[publication_structure_only]`, `gate4_formal_pass=false`,
-  `research_eligible=false`, and `backend_freeze.status=not_frozen` are
+  `research_eligible=false`, and `backend_freeze.status=not_frozen` remain
   fail-closed. The generic publisher cannot label arbitrary raw data PASS,
   FAIL, ABORTED, or warning-free.
 
-The structural publisher is therefore a CPU-tested candidate. It does not by
-itself authorize or classify a backend workload. The endpoint-reuse content
-layer now has the separate CPU implementation record in section 5; its real
+The structural publisher is therefore a corrected CPU-tested implementation
+candidate. It does not itself authorize or classify a backend workload. The
+endpoint-reuse content layer has the separate correction record below; its real
 workload remains unexecuted and unapproved. Twelve-agent reference cells and
 the eight-cell smoke also remain unexecuted after the prompt6 candidate.
 
-## 5. Endpoint-reuse implementation readiness
+## 5. Endpoint-reuse tooling correction
 
 This section is implementation/test evidence only. It is not an Ollama,
 NVIDIA, model, residency, endpoint-reuse, or cleanup observation.
 
-- Implementation commit:
-  `9828aea5de25f4f9262ad2d04192937ea1d2c1f4`.
-- Workload contract:
-  `docs/GATE4_OLLAMA_ENDPOINT_REUSE_SPEC.md`, version
-  `gate4-ollama-endpoint-reuse-v1.0.0`, SHA-256
-  `c7b945181502b070b67c9ece6c6f646e4ce058c20098bdbddbb36e5e760771af`.
-- Approval-bound orchestrator:
-  `tools/gate4_endpoint_reuse_orchestrator.py`, SHA-256
-  `82e4f3ac3163a576a51d68e43f3461c4efa150f032afefd0a8699aeeabeb05b1`.
-- Independent workload validator:
+### 5.1 Retained checker FAIL at `9d737cd...`
+
+The branch, local HEAD, tracking SHA, and remote SHA were all
+`9d737cd8adaa7c334f065932ea6772ff53363d1b`, the worktree was clean, and no
+tooling tag existed. The then-current endpoint-reuse suite passed `13/13` in
+2.236 seconds and the complete suite passed `256/256` in 25.698 seconds, but
+the supplied self-contained and adversarial fixtures classified that tooling
+state as `CHECKER FAIL / tooling freeze prohibited`. Passing the existing suite
+did not override the independently reproduced contradictions:
+
+1. after Qwen raised `TimeoutError`, queued Llama and Gemma workers still began
+   backend generation, for three actual calls;
+2. the six-generation budget was not enforced at the dispatch boundary, and an
+   early Phase 3 request could unload endpoints before its phase precondition
+   failed;
+3. persisted `workload-validation.json` bytes could say `FAIL / ineligible`
+   while recomputation, publication, independent verification, and the external
+   receipt said `PASS / eligible`;
+4. byte-identical alternate source/final directory inodes and a symlink-root
+   interpretation could differ across validator, publisher, and verifier
+   handoffs; and
+5. a final unload with `done=false` made the overall result fail but could leave
+   `checks.cleanup=PASS` because cleanup status depended on error text.
+
+The same review retained a non-blocking classification defect: a concurrent
+approval-ID loser could expose raw `FileExistsError` rather than the documented
+controlled collision. No repository file, real approval, Ollama/API endpoint,
+NVIDIA device, sudo policy, process, or GPU was changed or exercised by that
+checker run.
+
+### 5.2 Corrected implementation candidate
+
+The bounded correction is split across these reviewable implementation commits:
+
+- `05546a1174179fc04636dbfa263301a04bb8e203`,
+  `fix: enforce approval-bound endpoint execution stops`;
+- `6835508e3c20a2f3d7576746dcc76583eb944550`,
+  `fix: bind Gate 4 validation and directory identities`.
+
+The corrected contract and implementation pins are:
+
+- endpoint-reuse specification
+  `gate4-ollama-endpoint-reuse-v1.1.0`, SHA-256
+  `8ce1eb7c7e1c18d4476532864e245e026d2ffc8c9b4b55d847d71bf2c9404d73`;
+- orchestrator `tools/gate4_endpoint_reuse_orchestrator.py`, SHA-256
+  `6674a73d4ff7e62e9549801a5382226b95b1c8199e0cb80c2fb9dd29dca98023`;
+- independent workload validator
   `tools/validate_gate4_ollama_endpoint_reuse.py`, SHA-256
-  `83dd1a77dbf842955f7fee5c5163d1809212ace35b4599726e3b2ed8e63108e5`;
-  it does not import the orchestrator and its validation path performs no
-  Ollama, NVIDIA, sudo, or network action.
-- Synthetic CPU result: `13/13 PASS` for the endpoint-reuse suite and
-  `256/256 PASS` for the complete repository suite at the pre-documentation
-  implementation tree. `compileall` and `git diff --check` also passed.
-- GPU/network/process boundary: no real HTTP request, Ollama request, NVIDIA
-  query, sudo call, temporary server start, process signal, or GPU workload was
-  performed by this implementation verification.
+  `c58bc4118838ac6671870042f92b407f58e9687740fdeee1ce26a6ae38214d1c`;
+- shared no-follow identity primitive `tools/gate4_fs_identity.py`, SHA-256
+  `6a2e77af9490dcd9de7123ff3600f75b396207bdd4bef1acc2b34a02018360ae`.
 
-The closed approval has exactly two CLI inputs: the canonical approval path
-and its mandatory SHA-256. It fixes clean source SHA, implementation/spec
-hashes, exact ports/models/digests/UUIDs, six-generation budget, wall/request/
-cleanup/stability bounds, warning allowlist, existing-service PID, output root,
-and stop conditions. Workload settings have no CLI override.
+The observation, result, artifact-index, workload-validation,
+workload-validation-commitment, and external-receipt schemas are version 1.1.0.
+The endpoint approval remains the unchanged closed v1.0.0 schema; no approval
+artifact was created. The generic summary, generic approval, and capture-
+manifest schemas also remain v1.0.0 because their shapes did not change.
 
-The synthetic positive fixture completes a three-agent, one-step
-`Simulation.run()` with three Phase 1 calls, three between-phase unloads,
-three Phase 3 reload calls, a post-wait three-endpoint stability snapshot,
-strict run validation, effective cleanup, workload validation, generic staging
-validation, atomic generic publication, independent S/I/R verification, and
-published-byte workload revalidation. The generic summary remains
-`operational_backend_result=NOT_EVALUATED`; only the separate workload report
-may derive `PASS` or `PASS_WITH_WARNINGS`, and every outcome retains
-`gate4_formal_pass=false`, `research_eligible=false`, and
-`backend_freeze.status=not_frozen`.
+The workload-local `ApprovalExecutionGate` preserves the frozen Gate 2 rule
+that every submitted phase request settles, but atomically reserves immediately
+before each actual `backend.generate` call. The actual generation count is the
+number of those backend invocations, irrespective of successful records,
+logical Simulation submissions, HTTP attempts, retries, or administrative
+unloads. The first timeout, deadline expiry, transport/unexpected exception,
+generation-contract error, invalid sequence, or exhausted budget latches a
+one-way terminal reason; queued workers settle without starting a new backend
+generation. Before any first Phase 3 unload, the same gate requires the exact
+three successful Phase 1 roles, matching transcript state, no terminal latch,
+no prior Phase 3 start, three remaining generation slots, and an unexpired
+deadline.
 
-Negative CPU fixtures cover approval/hash/source/endpoint/budget rejection,
-HTTP/retry/parse/unload/placement/stability/cleanup failures, unknown warnings,
-interruption, collision, publication failure, and verification failure. The
-real backend code additionally requires loopback-only UUID-pinned temporary
-servers, exact endpoint-local model artifacts, direct API/CLI/GPU/process
-binding, unchanged port-11434 PID/start-time/version state, and exact-PID TERM
-cleanup without `systemctl`, shutdown, reboot, broad kill, or automatic
-SIGKILL escalation.
+Workload validation now has a pure read-only derivation and a separate
+non-self-referential commitment to the exact canonical persisted validation
+bytes. Source attempt, publisher staging, and published final validation must
+all match the independently derived bytes, SHA, operational result, eligibility,
+and fixed formal/research boundaries. Descriptor-derived `{device,inode}`
+identities bind the source and publication root into the publisher receipt, the
+final identity into the publisher-independent verifier and final workload
+validation, and both identities into the external receipt. Symlink roots or
+components and later inode substitutions fail closed. Cleanup is the conjunction
+of eight explicit evidence booleans; no status is derived from error text.
+Attempt, final, and receipt claim races use the controlled collision class.
 
-The implementation is a CPU readiness candidate, not a backend result or
-formal freeze. Its injected backend fixtures do not establish that the live
-sudo policy, Ollama 0.32.13 API responses, process ancestry, NVIDIA rows,
-warning behavior, exact-PID cleanup, or stability timing will satisfy the
-contract. No endpoint-reuse approval artifact or execution approval exists at
-this ledger version. A future real attempt requires a new explicit approval
-that names the then-clean HEAD and exact bounded envelope; creating this record
-does not grant that approval.
+### 5.3 CPU results and remaining boundary
+
+The corrected implementation tree produced these synthetic CPU results:
+
+```text
+endpoint-reuse suite              28/28 PASS   3.759 s
+publisher + independent verifier  47/47 PASS   1.505 s
+prompt6 regression                10/10 PASS   0.257 s
+complete repository suite        272/272 PASS 27.596 s
+compileall                         PASS
+git diff --check                  PASS
+```
+
+The retained timeout fixture now records one actual backend generation
+(`qwen:TimeoutError`), zero Llama/Gemma generation starts, cleanup called, and
+no publication. The seventh direct call is suppressed with the actual count
+remaining six. Early Phase 3 records zero unloads and zero backend generations.
+Source, staging, final, reverse persisted-result, alternate-inode, and symlink
+mismatches are rejected. A final unload with `done=false` yields overall FAIL,
+publication ineligibility, `checks.cleanup=FAIL`, and
+`final_unloads_complete=false`. The concurrent same-ID fixture produces exactly
+one owner and one controlled collision; a late publisher final-leaf collision
+is normalized to the same public class.
+
+All endpoint fixtures inject a CPU backend and guard real network/process/GPU
+entry points. They do not establish that live sudo policy, Ollama 0.32.13 API
+responses, process ancestry, NVIDIA rows, warning behavior, exact-PID cleanup,
+or stability timing will satisfy the contract. No real HTTP request, Ollama
+request, `nvidia-smi`, sudo call, temporary server, process signal, or GPU
+workload was performed. No real endpoint-reuse approval artifact exists.
+
+The current prompt6 runner's ledger pin is refreshed only to follow these
+updated repository-ledger bytes. The dependency is one-way: this ledger does
+not pin the current runner SHA. The historical prompt6 source snapshot and
+bundle remain unchanged; they are not altered, republished, repaired, or
+reclassified. Their retained axes remain `PASS_WITH_WARNINGS`,
+`NONCONFORMING / NOT FORMALLY ACCEPTED`, and formal eligibility `false`.
+
+Therefore the exact current classification is:
+
+```text
+Gate 4A tooling corrected implementation candidate: PASS
+Combined independent tooling recheck: PENDING
+Tooling freeze: NOT DONE
+Endpoint-reuse execution approval: NO
+Real endpoint-reuse execution: NOT PERFORMED
+Formal Gate 4A: NOT PASSED / NOT FROZEN
+Backend freeze: not_frozen
+Research eligibility: false
+```
+
+A future real attempt requires a new explicit approval naming the then-clean
+HEAD and exact bounded envelope. This ledger entry does not grant that approval.
