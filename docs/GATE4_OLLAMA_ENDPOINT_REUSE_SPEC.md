@@ -1,6 +1,6 @@
 # Gate 4 Ollama Endpoint-Reuse Specification
 
-Version: `gate4-ollama-endpoint-reuse-v1.2.0`
+Version: `gate4-ollama-endpoint-reuse-v1.2.1`
 
 Status: `CPU IMPLEMENTED CANDIDATE — REAL WORKLOAD NOT EXECUTED — NO EXECUTION APPROVAL`
 
@@ -378,23 +378,41 @@ field is the exact delimiter-free physical line bytes in base64, and its
 SHA-256 is recomputed. The workload validator independently reparses the
 indexed `server-logs/<role>.log` bytes and requires exact event-list equality.
 
-The logfmt-like parser consumes the complete line. It requires one unique
+Before UTF-8 decoding, a deterministic ASCII-oriented byte classifier scans
+only that delimiter-free physical line. ASCII case folding leaves unrelated
+non-ASCII and invalid bytes unable to erase surrounding diagnostic tokens. The
+authoritative raw bytes and SHA-256 are retained whether decoding succeeds or
+fails. The centralized bounded vocabulary recognizes `ERROR`, `FATAL`,
+`PANIC`, request failure/failed, watchdog, stale memory with space/hyphen/
+underscore separators, unable-to-refresh-free-memory, out-of-memory with
+space/hyphen/underscore separators, `OOM`, CUDA error, Xid, segfault, and
+crash. Token boundaries prevent matches inside unrelated words.
+
+The logfmt-like parser then consumes the complete line. It requires one unique
 `time`, `level`, `source`, and `msg` token, rejects malformed quoting,
 unstructured trailing text, duplicate core keys or attributes, invalid UTF-8,
 missing timezone, unknown level, and invalid/nonpositive source line. Other
 unique key/value tokens become explicit attributes; no remainder is ignored.
 INFO and DEBUG remain in the raw log but are not warning-allowlist candidates.
 
-Severity derives only from the single parsed `level` field. Parsed
-ERROR/FATAL/PANIC, or any structured/malformed record carrying an ERROR,
-FATAL, PANIC, OOM, out-of-memory, crash, segfault, CUDA-error, or Xid indicator,
-is `FAIL`. A duplicate/mixed severity line is malformed and `FAIL` whenever a
-fatal indicator is present. A malformed nonfatal warning-like line is
-`MANUAL_REVIEW_REQUIRED`. A parsed WARN is accepted only when its structured
-identity exactly equals one of the six approved events and its occurrence
-bound is not exceeded. An unknown WARN, request-failure WARN, watchdog WARN,
-stale/free-memory WARN, wrong role/UUID/source/message, extra attribute, or
-excess occurrence is `MANUAL_REVIEW_REQUIRED`. None is publication eligible.
+Classification order is raw capture and hash, raw-byte diagnostic extraction,
+strict UTF-8 decoding, closed structured parsing, malformed-input handling,
+fatal severity/indicator handling, and only then exact WARN identity matching.
+An invalid UTF-8 line with a fatal indicator is `FAIL`; invalid UTF-8 without a
+recognized fatal indicator is `MANUAL_REVIEW_REQUIRED`. Every invalid UTF-8
+line is retained and non-publishable, and none can be an accepted warning.
+
+Severity derives from the single parsed `level` field only after raw-byte
+preclassification. Parsed ERROR/FATAL/PANIC, or any structured/malformed record
+carrying ERROR, FATAL, PANIC, request-failure, watchdog, stale-memory,
+unable-to-refresh-free-memory, OOM/out-of-memory, crash, segfault, CUDA-error,
+or Xid evidence, is `FAIL`. A duplicate/mixed severity line is malformed and
+`FAIL` whenever a fatal indicator is present. A malformed nonfatal warning-like
+line is `MANUAL_REVIEW_REQUIRED`. A parsed WARN is accepted only when its
+structured identity exactly equals one of the six approved events and its
+occurrence bound is not exceeded. An otherwise unknown WARN, wrong role/UUID/
+source/message, extra attribute, or excess occurrence is
+`MANUAL_REVIEW_REQUIRED`. None is publication eligible.
 
 An approved WARN on a later physical line may itself be recorded as accepted,
 but it can never hide or downgrade an earlier failing line; any error makes the
@@ -511,9 +529,10 @@ GPU, Ollama, sudo, and network access. They must cover:
 - all six exact structured warning identities, no-warning PASS, mixed
   ERROR/FATAL plus approved fragments on one line, an approved WARN after an
   ERROR on a second physical line, duplicate severity, appended fatal text,
-  malformed quote/key, raw-line hash/trace mismatch, unknown/request-failure/
-  watchdog/stale-memory WARN, OOM/crash, wrong role/UUID/source/message,
-  extra attributes, and excess occurrence;
+  malformed quote/key, raw-line hash/trace mismatch, invalid UTF-8 with and
+  without fatal ASCII evidence, unknown/request-failure/watchdog/stale-memory
+  WARN, all space/hyphen/underscore out-of-memory variants, OOM/crash, wrong
+  role/UUID/source/message, extra attributes, and excess occurrence;
 - rejection of the historical v1.0 glob approval and static confirmation that
   the warning acceptance path contains no whole-line glob matcher;
 - a first-call timeout with the queued Llama and Gemma workers suppressed,
@@ -528,8 +547,9 @@ GPU, Ollama, sudo, and network access. They must cover:
   claim race with exactly one controlled collision;
 - one successful six-call fixture through workload validation, generic
   staging validation, publication, independent S/I/R verification, and final
-  workload revalidation with all six exact warnings; ERROR/FATAL/unknown
-  variants that cannot publish; exact unload payload and exact-PID TERM tests;
+  workload revalidation with all six exact warnings; invalid-UTF8 fatal,
+  hyphenated out-of-memory, ERROR/FATAL, and unknown variants that cannot
+  publish; exact unload payload and exact-PID TERM tests;
   and
 - retained `gate4_formal_pass=false`, `research_eligible=false`, and
   `backend_freeze.status=not_frozen` in every outcome.

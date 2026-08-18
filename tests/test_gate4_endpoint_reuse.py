@@ -55,6 +55,8 @@ class FakeBackend:
             "known_warning",
             "error_with_approved_warning",
             "fatal_with_approved_warning",
+            "invalid_utf8_fatal_with_approved_warning",
+            "out_of_memory_with_approved_warning",
         }:
             for endpoint in approval["endpoints"]:
                 role = endpoint["model_role"]
@@ -80,6 +82,17 @@ class FakeBackend:
         elif self.scenario == "fatal_with_approved_warning":
             logs["qwen"] = (
                 self._log_line("FATAL", 901, "synthetic fatal event").encode()
+                + logs["qwen"]
+            )
+        elif self.scenario == "invalid_utf8_fatal_with_approved_warning":
+            logs["qwen"] = (
+                b'time=2026-08-17T12:00:00+00:00 level=ERROR '
+                b'source=runner.go:902 msg="request failure" invalid=\xff\n'
+                + logs["qwen"]
+            )
+        elif self.scenario == "out_of_memory_with_approved_warning":
+            logs["qwen"] = (
+                self._log_line("WARN", 903, "out-of-memory while loading").encode()
                 + logs["qwen"]
             )
         return logs
@@ -871,22 +884,116 @@ class EndpointReuseTests(unittest.TestCase):
                 self.assertEqual(operational, "FAIL")
 
     def test_unknown_request_watchdog_and_stale_memory_warn_are_nonpublishable(self):
-        messages = (
-            "new warning",
+        raw = FakeBackend._log_line("WARN", 999, "new warning").encode()
+        _, accepted, unknown, errors, operational = self.warning_result(
+            {"qwen": raw}
+        )
+        self.assertEqual(accepted, [])
+        self.assertEqual(errors, [])
+        self.assertEqual(len(unknown), 1)
+        self.assertEqual(operational, "MANUAL_REVIEW_REQUIRED")
+
+        fatal_messages = (
             "request failure",
             "llama-server GPU discovery watchdog timed out",
             "unable to refresh free memory, using old values",
         )
-        for message in messages:
+        for message in fatal_messages:
             with self.subTest(message=message):
                 raw = FakeBackend._log_line("WARN", 999, message).encode()
                 _, accepted, unknown, errors, operational = self.warning_result(
                     {"qwen": raw}
                 )
                 self.assertEqual(accepted, [])
-                self.assertEqual(errors, [])
-                self.assertEqual(len(unknown), 1)
-                self.assertEqual(operational, "MANUAL_REVIEW_REQUIRED")
+                self.assertEqual(unknown, [])
+                self.assertTrue(errors)
+                self.assertEqual(operational, "FAIL")
+
+    def test_invalid_utf8_preserves_raw_fatal_indicators_and_is_never_accepted(self):
+        approved = self.exact_warning_logs()["qwen"].splitlines()[0] + b"\n"
+        cases = {
+            "error_request_failure": (
+                b'time=2026-08-17T12:00:00+00:00 level=ERROR '
+                b'source=runner.go:900 msg="request failure" invalid=\xff\n',
+                {"ERROR", "REQUEST_FAILURE"},
+            ),
+            "fatal": (
+                b'time=2026-08-17T12:00:00+00:00 level=FATAL '
+                b'source=runner.go:901 msg="fatal" invalid=\xfe\n',
+                {"FATAL"},
+            ),
+            "panic": (
+                b'time=2026-08-17T12:00:00+00:00 level=PANIC '
+                b'source=runner.go:902 msg="panic" invalid=\xfd\n',
+                {"PANIC"},
+            ),
+        }
+        for name, (raw, indicators) in cases.items():
+            with self.subTest(name=name):
+                events, accepted, unknown, errors, operational = self.warning_result(
+                    {"qwen": raw + approved}
+                )
+                self.assertEqual(events[0]["parse_status"], "malformed")
+                self.assertEqual(events[0]["malformation_reason"], "invalid_utf8")
+                self.assertTrue(
+                    indicators.issubset(events[0]["diagnostic_indicators"])
+                )
+                self.assertEqual(len(accepted), 1)
+                self.assertEqual(unknown, [])
+                self.assertTrue(errors)
+                self.assertEqual(operational, "FAIL")
+
+        raw = b"synthetic invalid diagnostic \xff\n"
+        events, accepted, unknown, errors, operational = self.warning_result(
+            {"qwen": raw}
+        )
+        self.assertEqual(events[0]["malformation_reason"], "invalid_utf8")
+        self.assertEqual(events[0]["diagnostic_indicators"], [])
+        self.assertEqual(accepted, [])
+        self.assertEqual(len(unknown), 1)
+        self.assertEqual(errors, [])
+        self.assertEqual(operational, "MANUAL_REVIEW_REQUIRED")
+
+    def test_out_of_memory_separator_variants_are_fatal(self):
+        variants = {
+            "out of memory": "OUT_OF_MEMORY",
+            "out-of-memory": "OUT_OF_MEMORY",
+            "out_of_memory": "OUT_OF_MEMORY",
+            "OOM": "OOM",
+        }
+        for message, indicator in variants.items():
+            with self.subTest(message=message):
+                raw = FakeBackend._log_line("WARN", 999, message).encode()
+                events, accepted, unknown, errors, operational = self.warning_result(
+                    {"qwen": raw}
+                )
+                self.assertIn(indicator, events[0]["diagnostic_indicators"])
+                self.assertEqual(accepted, [])
+                self.assertEqual(unknown, [])
+                self.assertTrue(errors)
+                self.assertEqual(operational, "FAIL")
+
+    def test_approved_warning_cannot_hide_any_prior_fatal_diagnostic(self):
+        approved = self.exact_warning_logs()["qwen"].splitlines()[0] + b"\n"
+        cases = (
+            ("ERROR", "synthetic error"),
+            ("FATAL", "synthetic fatal"),
+            ("PANIC", "synthetic panic"),
+            ("WARN", "request failed"),
+            ("WARN", "watchdog timeout"),
+            ("WARN", "stale-memory observation"),
+            ("WARN", "out-of-memory"),
+            ("WARN", "runner crash"),
+        )
+        for level, message in cases:
+            with self.subTest(level=level, message=message):
+                fatal = FakeBackend._log_line(level, 999, message).encode()
+                _, accepted, _, errors, operational = self.warning_result(
+                    {"qwen": fatal + approved}
+                )
+                self.assertEqual(len(accepted), 1)
+                self.assertTrue(errors)
+                self.assertEqual(operational, "FAIL")
 
     def test_oom_and_crash_warn_remain_fatal(self):
         for message in ("OOM while loading", "runner crash observed"):
@@ -1049,6 +1156,18 @@ class EndpointReuseTests(unittest.TestCase):
                 self.assertFalse(receipt.publication_verified)
                 self.assertEqual(receipt.operational_backend_result, "FAIL")
                 self.assertIsNone(receipt.final_path)
+
+    def test_invalid_utf8_and_hyphenated_oom_full_paths_do_not_publish(self):
+        for scenario in (
+            "invalid_utf8_fatal_with_approved_warning",
+            "out_of_memory_with_approved_warning",
+        ):
+            with self.subTest(scenario=scenario):
+                _, _, _, receipt = self.run_fixture(scenario)
+                self.assertFalse(receipt.publication_verified)
+                self.assertEqual(receipt.operational_backend_result, "FAIL")
+                self.assertIsNone(receipt.final_path)
+                self.assertIsNone(receipt.receipt_path)
 
     def test_stability_wait_and_abort_classification_are_mechanical(self):
         value = self.approval_value("reuse-stability")

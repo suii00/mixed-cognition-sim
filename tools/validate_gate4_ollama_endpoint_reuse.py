@@ -33,7 +33,7 @@ from tools.gate4_fs_identity import (
 )
 
 
-SPEC_VERSION = "gate4-ollama-endpoint-reuse-v1.2.0"
+SPEC_VERSION = "gate4-ollama-endpoint-reuse-v1.2.1"
 APPROVAL_SCHEMA_VERSION = "gate4-ollama-endpoint-reuse-approval-v1.1.0"
 OBSERVATION_SCHEMA_VERSION = "gate4-ollama-endpoint-reuse-observations-v1.2.0"
 RESULT_SCHEMA_VERSION = "gate4-ollama-endpoint-reuse-result-v1.1.0"
@@ -178,6 +178,9 @@ FATAL_DIAGNOSTIC_INDICATORS = {
     "ERROR",
     "FATAL",
     "PANIC",
+    "REQUEST_FAILURE",
+    "WATCHDOG",
+    "STALE_MEMORY",
     "OOM",
     "OUT_OF_MEMORY",
     "CRASH",
@@ -286,31 +289,60 @@ def canonical_json_bytes(value: Any) -> bytes:
     )
 
 
-def _diagnostic_indicators(text: str) -> list[str]:
-    upper = text.upper()
-    indicators = set(
-        re.findall(r"(?<![A-Z0-9_])(WARN|ERROR|FATAL|PANIC)(?![A-Z0-9_])", upper)
+_DIAGNOSTIC_BYTE_PATTERNS = (
+    (re.compile(rb"(?<![A-Z0-9_])WARN(?![A-Z0-9_])"), "WARN"),
+    (re.compile(rb"(?<![A-Z0-9_])ERROR(?![A-Z0-9_])"), "ERROR"),
+    (re.compile(rb"(?<![A-Z0-9_])FATAL(?![A-Z0-9_])"), "FATAL"),
+    (re.compile(rb"(?<![A-Z0-9_])PANIC(?![A-Z0-9_])"), "PANIC"),
+    (
+        re.compile(
+            rb"(?<![A-Z0-9_])REQUEST[ _-]+(?:FAILURE|FAILED)(?![A-Z0-9_])"
+        ),
+        "REQUEST_FAILURE",
+    ),
+    (re.compile(rb"(?<![A-Z0-9_])WATCHDOG(?![A-Z0-9_])"), "WATCHDOG"),
+    (
+        re.compile(rb"(?<![A-Z0-9_])STALE[ _-]+MEMORY(?![A-Z0-9_])"),
+        "STALE_MEMORY",
+    ),
+    (
+        re.compile(
+            rb"(?<![A-Z0-9_])UNABLE[ _-]+TO[ _-]+REFRESH[ _-]+FREE[ _-]+MEMORY(?![A-Z0-9_])"
+        ),
+        "STALE_MEMORY",
+    ),
+    (
+        re.compile(
+            rb"(?<![A-Z0-9_])OUT[ _-]+OF[ _-]+MEMORY(?![A-Z0-9_])"
+        ),
+        "OUT_OF_MEMORY",
+    ),
+    (re.compile(rb"(?<![A-Z0-9_])OOM(?![A-Z0-9_])"), "OOM"),
+    (
+        re.compile(rb"(?<![A-Z0-9_])CUDA[ _-]+ERROR(?![A-Z0-9_])"),
+        "CUDA_ERROR",
+    ),
+    (re.compile(rb"(?<![A-Z0-9_])XID(?![A-Z0-9_])"), "XID"),
+    (re.compile(rb"(?<![A-Z0-9_])SEGFAULT(?![A-Z0-9_])"), "SEGFAULT"),
+    (re.compile(rb"(?<![A-Z0-9_])CRASH(?![A-Z0-9_])"), "CRASH"),
+)
+
+
+def diagnostic_indicators_from_raw_bytes(raw_line: bytes) -> tuple[str, ...]:
+    """Classify bounded ASCII diagnostics without requiring UTF-8 decoding."""
+
+    if not isinstance(raw_line, bytes):
+        raise TypeError("raw_line must be bytes")
+    ascii_folded = raw_line.upper()
+    return tuple(
+        sorted(
+            {
+                label
+                for pattern, label in _DIAGNOSTIC_BYTE_PATTERNS
+                if pattern.search(ascii_folded) is not None
+            }
+        )
     )
-    phrases = (
-        ("OUT OF MEMORY", "OUT_OF_MEMORY"),
-        ("CUDA ERROR", "CUDA_ERROR"),
-        ("REQUEST FAILURE", "REQUEST_FAILURE"),
-        ("REQUEST FAILED", "REQUEST_FAILURE"),
-        ("WATCHDOG", "WATCHDOG"),
-        ("STALE-MEMORY", "STALE_MEMORY"),
-        ("STALE MEMORY", "STALE_MEMORY"),
-        ("UNABLE TO REFRESH FREE MEMORY", "STALE_MEMORY"),
-        ("SEGFAULT", "SEGFAULT"),
-        ("CRASH", "CRASH"),
-    )
-    for phrase, label in phrases:
-        if phrase in upper:
-            indicators.add(label)
-    if re.search(r"(?<![A-Z0-9_])OOM(?![A-Z0-9_])", upper):
-        indicators.add("OOM")
-    if re.search(r"(?<![A-Z0-9_])XID(?![A-Z0-9_])", upper):
-        indicators.add("XID")
-    return sorted(indicators)
 
 
 def _warning_event_base(
@@ -319,11 +351,6 @@ def _warning_event_base(
     line_sequence: int,
     raw_line: bytes,
 ) -> Dict[str, Any]:
-    decoded = None
-    try:
-        decoded = raw_line.decode("utf-8")
-    except UnicodeDecodeError:
-        pass
     return {
         "parse_status": "malformed",
         "role": role,
@@ -338,8 +365,8 @@ def _warning_event_base(
         "raw_line_base64": base64.b64encode(raw_line).decode("ascii"),
         "raw_line_sha256": _sha256(raw_line),
         "malformation_reason": None,
-        "diagnostic_indicators": (
-            _diagnostic_indicators(decoded) if decoded is not None else []
+        "diagnostic_indicators": list(
+            diagnostic_indicators_from_raw_bytes(raw_line)
         ),
     }
 
@@ -447,9 +474,17 @@ def parse_ollama_diagnostic_stream(
             raw_line = raw_line[:-1]
         event = parse_ollama_log_line(role, stream, line_sequence, raw_line)
         if event["parse_status"] == "parsed":
-            if event["level"] in {"WARN", "ERROR", "FATAL", "PANIC"}:
+            if (
+                event["level"] in {"WARN", "ERROR", "FATAL", "PANIC"}
+                or set(event["diagnostic_indicators"])
+                & FATAL_DIAGNOSTIC_INDICATORS
+            ):
                 events.append(event)
-        elif b"level=" in raw_line or event["diagnostic_indicators"]:
+        elif (
+            event["malformation_reason"] == "invalid_utf8"
+            or b"level=" in raw_line
+            or event["diagnostic_indicators"]
+        ):
             events.append(event)
     return events
 
