@@ -1,6 +1,6 @@
 # Gate 4 Backend Evidence Ledger
 
-Version: `gate4-backend-evidence-ledger-v1.5.0`
+Version: `gate4-backend-evidence-ledger-v1.6.0`
 
 Status: `WORKING CANDIDATE INDEX — NOT A BACKEND FREEZE`
 
@@ -627,6 +627,137 @@ Combined independent tooling recheck: PENDING
 Replacement tooling freeze: NOT DONE
 Old tooling tag: HISTORICAL / SUPERSEDED FOR EXECUTION
 Rejected approval: NOT AUTHORIZED / NOT EXECUTED
+New approval candidate: NOT CREATED
+Formal Gate 4A: NOT PASSED / NOT FROZEN
+Backend freeze: not_frozen
+Research eligibility: false
+```
+
+## 7. Raw-byte diagnostics and retired approval identity correction
+
+This section records CPU tooling evidence only. It is not an Ollama, NVIDIA,
+endpoint, cleanup, backend-freeze, pilot, or research observation.
+
+### 7.1 Failed replacement-tooling check at `5a3f179...`
+
+The replacement-tooling checker classified commit
+`5a3f17928bc02cf9cad995e6dfd6e50ed5ed7e18` as `FAIL` and prohibited a
+replacement tooling freeze or new approval. Three directly reproduced gaps
+remained after the structured warning-policy correction:
+
+1. invalid UTF-8 caused the event constructor to discard every diagnostic
+   indicator because indicator extraction depended on successful full-line
+   UTF-8 decoding;
+2. the OOM vocabulary recognized `OUT OF MEMORY` but not the hyphenated
+   `OUT-OF-MEMORY` spelling; and
+3. the specification retired the rejected approval and bundle identity, but
+   executable validation did not prevent a current-schema object from reusing
+   that identity.
+
+The historical tooling tag
+`gate4a-endpoint-reuse-tooling-frozen-20260817` remains at
+`225ae755f3dff2400d2fa8a60b1d1bb9a3e17071` and is superseded for execution.
+The rejected identity and immutable source files remain:
+
+```text
+approval_id        = gate4a-endpoint-reuse-fp16-20260817T124139Z
+evidence_bundle_id = gate4a-endpoint-reuse-fp16-20260817T124139Z
+approval SHA-256   = b97d603b2e34c0e7157398a916ae6485e60bc6304746cb2189a1db11187756d4
+review             = FAIL
+authorization      = NO
+orchestrator run   = NOT PERFORMED
+reason code        = warning_policy_overbroad
+```
+
+Neither the rejected JSON nor its summary was edited, replaced, deleted,
+executed, or reissued.
+
+### 7.2 Bounded implementation correction
+
+Commit `90591089b75738cd15386a5452abb94b497ceacc`,
+`fix: preserve fatal diagnostics across invalid UTF-8`, performs bounded ASCII
+case folding and diagnostic matching on each raw delimiter-free physical line
+before strict UTF-8 decoding. The raw bytes, base64 representation, and SHA-256
+remain authoritative. Invalid UTF-8 with a fatal indicator is `FAIL`; invalid
+UTF-8 without a recognized fatal indicator is `MANUAL_REVIEW_REQUIRED`. Both
+are retained and publication ineligible, and neither can enter the exact WARN
+allowlist.
+
+The centralized byte vocabulary uses token boundaries and recognizes
+ERROR/FATAL/PANIC, request failure/failed, watchdog, stale memory and
+unable-to-refresh-free-memory, OOM, CUDA error, Xid, segfault, and crash.
+Space, hyphen, and underscore separators are accepted for stale-memory and
+out-of-memory families, so `out of memory`, `out-of-memory`, and
+`out_of_memory` all yield `OUT_OF_MEMORY`. A later exact approved WARN cannot
+remove the earlier failure.
+
+Commit `334ba662941bc4d16ffcaa914d2b06711ab5e21f`,
+`fix: retire rejected Gate 4 approval identity`, adds an immutable executable
+registry entry containing the original approval SHA, rejected status, and
+reason code. Either `approval_id` or `evidence_bundle_id` triggers retirement
+before closed-schema validation, evidence-root creation, attempt claim, backend
+preflight, GPU/API work, or publication. The check is independent of schema
+version, approval SHA, source commit, endpoints, and warning contents; Markdown
+is not an enforcement source.
+
+The resulting contract pins are:
+
+- endpoint-reuse specification
+  `gate4-ollama-endpoint-reuse-v1.2.1`, SHA-256
+  `df5ec64e7272b7806c37d74544e9b6f78f59e344accf0bcf4ec63964c59d4881`;
+- executable approval schema
+  `gate4-ollama-endpoint-reuse-approval-v1.1.1` (unchanged v1.1 field shape,
+  stricter retired-identity semantics);
+- observation schema
+  `gate4-ollama-endpoint-reuse-observations-v1.2.0` and workload-validation
+  schema `gate4-ollama-endpoint-reuse-validation-v1.2.0`, unchanged because no
+  serialized field changed;
+- workload validator `tools/validate_gate4_ollama_endpoint_reuse.py`, SHA-256
+  `aa7737035c9514eea316157e73783a7c8c28492624589c4c467c8b4fb171c536`;
+- orchestrator `tools/gate4_endpoint_reuse_orchestrator.py`, unchanged SHA-256
+  `d7c17e92607eeb3e8ab59ae4f6d972282327c70fda070627ca1225d95f720915`;
+- unchanged publication specification, publisher, and standalone verifier,
+  SHA-256 respectively
+  `8201013f77d98cc0c63559fe31a7c3c8d4dc90b4d1eda0f245d0e56f77ba7b6c`,
+  `83bb7a19f945023e3de0ad7a470eab82123d34d7b1e213b69aaaab4ff8298734`,
+  and `c31fe2f06eba5f86086092e6dc3e2682c9c1be5c5eb76d24664a6e0fac6f5e5b`.
+
+### 7.3 CPU results and current boundary
+
+Repository-owned CPU runs after both corrections recorded:
+
+```text
+endpoint-reuse targeted suite     44/44 PASS (4.270 s)
+publisher + independent verifier  47/47 PASS (1.585 s)
+prompt6 regression                10/10 PASS (0.258 s)
+complete repository suite        288/288 PASS (27.664 s)
+compileall                         PASS
+git diff --check                  PASS
+```
+
+The six exact structured WARN events still publish and independently verify;
+the warning-free control remains `PASS`; an unknown valid UTF-8 WARN remains
+`MANUAL_REVIEW_REQUIRED`. Invalid-UTF8 fatal and hyphenated out-of-memory full
+orchestrator fixtures are `FAIL`, create no final publication, and create no
+success receipt. Old-schema and current-schema uses of the retired ID fail;
+a fresh-ID control passes schema validation without execution. The retired-ID
+orchestrator fixture records backend preflight count zero and creates no
+attempt, publication, or receipt directory.
+
+No GPU, `nvidia-smi`, Ollama/API, sudo, external network, temporary server,
+process signal, real approval, or endpoint execution was used by this limited
+correction. No replacement tag was created and nothing was pushed. The current
+prompt6 runner ledger pin is refreshed only after these ledger bytes are final;
+the dependency remains one-way and historical prompt6 evidence is unchanged.
+
+The exact current classification is:
+
+```text
+Gate 4A diagnostics/approval corrected tooling candidate: PASS
+Independent replacement tooling recheck: PENDING
+Replacement tooling freeze: NOT DONE
+Historical tooling tags: SUPERSEDED FOR EXECUTION
+Rejected approval: NOT AUTHORIZED / NOT EXECUTED / ID RETIRED
 New approval candidate: NOT CREATED
 Formal Gate 4A: NOT PASSED / NOT FROZEN
 Backend freeze: not_frozen
