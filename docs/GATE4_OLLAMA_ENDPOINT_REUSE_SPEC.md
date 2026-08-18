@@ -51,7 +51,9 @@ edited, corrected, republished, or promoted by this workload.
 ## 3. Required approval artifact
 
 The only executable approval schema is
-`gate4-ollama-endpoint-reuse-approval-v1.1.0`. The approval is canonical JSON,
+`gate4-ollama-endpoint-reuse-approval-v1.1.1`. This patch version retains the
+v1.1 field shape and adds machine-enforced retired-identity semantics. The
+approval is canonical JSON,
 has no unknown fields, and is supplied with its expected SHA-256. The CLI has
 no execution-setting overrides.
 
@@ -157,9 +159,21 @@ extra attributes, missing entries, and occurrence bounds other than one are
 rejected before an attempt. Absence of an approved event is acceptable.
 
 The historical `gate4-ollama-endpoint-reuse-approval-v1.0.0` schema and its
-`allowed_warning_patterns` field are rejected by v1.2 tooling. In particular,
-the rejected approval ID `gate4a-endpoint-reuse-fp16-20260817T124139Z` cannot
-be reused, edited, executed, or promoted.
+`allowed_warning_patterns` field are rejected by v1.2.1 tooling. Independently
+of schema version, SHA, source commit, endpoints, or warning contents, the
+executable retired-identity registry rejects
+`gate4a-endpoint-reuse-fp16-20260817T124139Z` if it appears as either
+`approval_id` or `evidence_bundle_id`. The registry binds the original approval
+SHA-256
+`b97d603b2e34c0e7157398a916ae6485e60bc6304746cb2189a1db11187756d4`,
+status `rejected`, and reason code `warning_policy_overbroad`.
+
+Retirement is evaluated before closed-schema validation, evidence-root or
+attempt creation, backend preflight, GPU/API action, or publication. Converting
+the historical content to a newer schema cannot revive the identity. The
+rejected files remain immutable history and are never an executable registry
+source; Markdown is not parsed for enforcement. A future approval must use a
+new unique ID.
 
 The closed v1 bounds are:
 
@@ -535,6 +549,9 @@ GPU, Ollama, sudo, and network access. They must cover:
   role/UUID/source/message, extra attributes, and excess occurrence;
 - rejection of the historical v1.0 glob approval and static confirmation that
   the warning acceptance path contains no whole-line glob matcher;
+- rejection of the historical retired approval and bundle ID under both old
+  and current approval schemas before any evidence-root or backend side effect,
+  plus a fresh-ID schema-validation-only control;
 - a first-call timeout with the queued Llama and Gemma workers suppressed,
   fake-clock expiry before the second reservation, direct rejection of a
   seventh generation before backend invocation, and early Phase 3 rejection

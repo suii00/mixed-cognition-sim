@@ -23,6 +23,7 @@ import sys
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path, PurePosixPath
+from types import MappingProxyType
 from typing import Any, Dict, Mapping, Optional, Sequence
 
 from tools.validate_run import validate_run
@@ -34,7 +35,7 @@ from tools.gate4_fs_identity import (
 
 
 SPEC_VERSION = "gate4-ollama-endpoint-reuse-v1.2.1"
-APPROVAL_SCHEMA_VERSION = "gate4-ollama-endpoint-reuse-approval-v1.1.0"
+APPROVAL_SCHEMA_VERSION = "gate4-ollama-endpoint-reuse-approval-v1.1.1"
 OBSERVATION_SCHEMA_VERSION = "gate4-ollama-endpoint-reuse-observations-v1.2.0"
 RESULT_SCHEMA_VERSION = "gate4-ollama-endpoint-reuse-result-v1.1.0"
 INDEX_SCHEMA_VERSION = "gate4-ollama-endpoint-reuse-artifact-index-v1.1.0"
@@ -103,6 +104,19 @@ REQUIRED_STOP_CONDITIONS = sorted(
         "timeout",
         "unknown_warning",
     ]
+)
+RETIRED_APPROVAL_IDENTITIES = MappingProxyType(
+    {
+        "gate4a-endpoint-reuse-fp16-20260817T124139Z": MappingProxyType(
+            {
+                "approval_sha256": (
+                    "b97d603b2e34c0e7157398a916ae6485e60bc6304746cb2189a1db11187756d4"
+                ),
+                "status": "rejected",
+                "reason_code": "warning_policy_overbroad",
+            }
+        )
+    }
 )
 
 APPROVAL_FIELDS = {
@@ -626,7 +640,23 @@ def _sorted_unique_strings(value: Any, context: str) -> list[str]:
     return value
 
 
+def reject_retired_approval_identity(value: Any) -> None:
+    """Reject retired approval or bundle IDs before schema-dependent handling."""
+
+    if not isinstance(value, Mapping):
+        return
+    for field in ("approval_id", "evidence_bundle_id"):
+        identity = value.get(field)
+        if isinstance(identity, str) and identity in RETIRED_APPROVAL_IDENTITIES:
+            record = RETIRED_APPROVAL_IDENTITIES[identity]
+            raise EndpointReuseValidationError(
+                f"approval.{field} uses retired identity {identity!r} "
+                f"({record['reason_code']})"
+            )
+
+
 def validate_approval(value: Any) -> Mapping[str, Any]:
+    reject_retired_approval_identity(value)
     approval = _exact_object(value, APPROVAL_FIELDS, "approval")
     if approval["schema_version"] != APPROVAL_SCHEMA_VERSION:
         raise EndpointReuseValidationError("approval schema_version differs")
@@ -765,7 +795,7 @@ def validate_approval(value: Any) -> Mapping[str, Any]:
         identities.add(identity)
     if allowed_events != expected_allowed_warning_events(approval):
         raise EndpointReuseValidationError(
-            "allowed_warning_events differs from the six fixed v1.1 identities"
+            "allowed_warning_events differs from the six fixed v1.1.1 identities"
         )
     conditions = _sorted_unique_strings(approval["stop_conditions"], "stop_conditions")
     if conditions != REQUIRED_STOP_CONDITIONS:

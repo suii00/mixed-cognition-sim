@@ -29,12 +29,14 @@ GPU_UUIDS = {
     "llama": "GPU-2964f342-8734-a701-a2c6-4344579b03ee",
     "gemma": "GPU-af1ef9b0-329f-ff38-d4dd-062e2beca9e0",
 }
+RETIRED_APPROVAL_ID = "gate4a-endpoint-reuse-fp16-20260817T124139Z"
 
 
 class FakeBackend:
     def __init__(self, scenario="success"):
         self.scenario = scenario
         self.generation_count = 0
+        self.preflight_count = 0
         self.unload_count = 0
         self.cleanup_called = False
         self.generation_sequence = []
@@ -141,6 +143,7 @@ class FakeBackend:
         }
 
     def preflight(self, approval, attempt_dir):
+        self.preflight_count += 1
         if self.scenario == "keyboard_interrupt":
             raise KeyboardInterrupt
         artifacts = []
@@ -1669,6 +1672,71 @@ class EndpointReuseTests(unittest.TestCase):
                 path, digest = self.write_approval(value)
                 with self.assertRaises(orchestrator.EndpointReuseInvocationError):
                     orchestrator.load_approval(path, digest)
+
+    def test_retired_identity_rejects_old_and_current_schema_before_other_rules(self):
+        retired_record = validator.RETIRED_APPROVAL_IDENTITIES[RETIRED_APPROVAL_ID]
+        self.assertEqual(
+            dict(retired_record),
+            {
+                "approval_sha256": (
+                    "b97d603b2e34c0e7157398a916ae6485e60bc6304746cb2189a1db11187756d4"
+                ),
+                "status": "rejected",
+                "reason_code": "warning_policy_overbroad",
+            },
+        )
+
+        old = self.approval_value(RETIRED_APPROVAL_ID)
+        old["schema_version"] = "gate4-ollama-endpoint-reuse-approval-v1.0.0"
+        old.pop("allowed_warning_events")
+        old["allowed_warning_patterns"] = ["time=* level=WARN *"]
+        with self.assertRaisesRegex(
+            validator.EndpointReuseValidationError,
+            "retired identity",
+        ):
+            validator.validate_approval(old)
+
+        current_cases = {}
+        retired_approval = self.approval_value("reuse-retired-approval-field")
+        retired_approval["approval_id"] = RETIRED_APPROVAL_ID
+        current_cases["approval_id"] = retired_approval
+        retired_bundle = self.approval_value("reuse-retired-bundle-field")
+        retired_bundle["evidence_bundle_id"] = RETIRED_APPROVAL_ID
+        current_cases["evidence_bundle_id"] = retired_bundle
+        for field, value in current_cases.items():
+            with self.subTest(field=field):
+                path, digest = self.write_approval(value)
+                with self.assertRaisesRegex(
+                    orchestrator.EndpointReuseInvocationError,
+                    "retired identity",
+                ):
+                    orchestrator.load_approval(path, digest)
+
+        fresh = self.approval_value("reuse-fresh-identity-control")
+        self.assertIs(validator.validate_approval(fresh), fresh)
+
+    def test_retired_identity_stops_before_root_or_backend_side_effects(self):
+        value = self.approval_value(RETIRED_APPROVAL_ID)
+        path, digest = self.write_approval(value)
+        backend = FakeBackend()
+        with self.cpu_only_runtime():
+            with self.assertRaisesRegex(
+                orchestrator.EndpointReuseInvocationError,
+                "retired identity",
+            ):
+                orchestrator.run_approved_endpoint_reuse(
+                    path,
+                    digest,
+                    repository=REPO_ROOT,
+                    backend=backend,
+                    source_probe=self.source_probe,
+                    sleep_fn=lambda _seconds: None,
+                )
+        self.assertEqual(backend.preflight_count, 0)
+        evidence_root = Path(value["evidence_root"])
+        self.assertFalse((evidence_root / "attempts").exists())
+        self.assertFalse((evidence_root / "published").exists())
+        self.assertFalse((evidence_root / "receipts").exists())
 
     def test_wall_time_ceiling_is_derived_from_observed_elapsed_time(self):
         value = self.approval_value("reuse-wall-time", maximum_wall_seconds=1)
